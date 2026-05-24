@@ -10,10 +10,16 @@ class PluginConfig:
     inject_fifo_in_group: bool = True
     auto_summary_interval_minutes: int = 0
     max_memory_per_layer: int = 50
+    fleeting_ttl_rounds: int = 3           # 短暂记忆存活轮数（经历x次总结后自动移除）
+    max_concurrent_summaries: int = 2      # 最大并发总结任务数
 
     # LLM Provider 配置
     summary_provider_id: str = ""           # 留空 = 使用 AstrBot 主对话模型
     summary_system_prompt: str = ""         # 总结任务的额外系统提示词
+
+    # 总结提示词模板（留空则使用默认提示词）
+    summary_search_replace_prompt: str = ""   # search_replace 模式的完整提示词模板
+    summary_full_replace_prompt: str = ""     # full_replace 模式的完整提示词模板
 
     # 注入控制
     inject_memory_in_private: bool = True
@@ -34,8 +40,12 @@ class PluginConfig:
             inject_fifo_in_group=config.get("inject_fifo_in_group", True),
             auto_summary_interval_minutes=config.get("auto_summary_interval_minutes", 0),
             max_memory_per_layer=config.get("max_memory_per_layer", 50),
+            fleeting_ttl_rounds=config.get("fleeting_ttl_rounds", 3),
+            max_concurrent_summaries=config.get("max_concurrent_summaries", 2),
             summary_provider_id=config.get("summary_provider_id", ""),
             summary_system_prompt=config.get("summary_system_prompt", ""),
+            summary_search_replace_prompt=config.get("summary_search_replace_prompt", ""),
+            summary_full_replace_prompt=config.get("summary_full_replace_prompt", ""),
             inject_memory_in_private=config.get("inject_memory_in_private", True),
             inject_layers_in_group=config.get("inject_layers_in_group", "important_only"),
             enable_auto_summary=config.get("enable_auto_summary", True),

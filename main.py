@@ -1,9 +1,6 @@
 
 import asyncio
-import json
-import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -12,15 +9,15 @@ _plugin_dir = Path(__file__).parent.resolve()
 if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
 
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from core.config import PluginConfig
-from core.models import ConversationTurn, MemoryState, MemoryEntry
-from core.exceptions import SummaryError, ValidationError
+from core.models import ConversationTurn, MemoryEntry
+from core.exceptions import SummaryError
 
 from storage.database import SQLiteDB
 from storage.memory_repo import MemoryRepository
@@ -64,6 +61,10 @@ class SmartMemoryPlugin(Star):
         # 初始化标记
         self._initialized = False
 
+        # 并发控制（延迟初始化，避免事件循环问题）
+        self._summary_semaphore = None
+        self._summary_round_counter: Dict[str, int] = {}
+
     async def initialize(self):
         """插件初始化"""
         if self._initialized:
@@ -90,6 +91,10 @@ class SmartMemoryPlugin(Star):
         )
         self.memory_tools = MemoryTools(self.config, self.mem_repo)
 
+        # 初始化信号量
+        if self._summary_semaphore is None:
+            self._summary_semaphore = asyncio.Semaphore(self.config.max_concurrent_summaries)
+
         self._initialized = True
         logger.info("SmartMemory 插件初始化完成")
 
@@ -97,9 +102,12 @@ class SmartMemoryPlugin(Star):
     # 事件监听
     # ------------------------------------------------------------------
 
+    # 临时存储用户消息，用于在 on_llm_response 中配对
+    _pending_user_messages: dict = {}
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """在 LLM 请求前注入记忆"""
+        """在 LLM 请求前注入记忆，并记录用户消息"""
         if not self._initialized:
             await self.initialize()
 
@@ -127,107 +135,97 @@ class SmartMemoryPlugin(Star):
                 "但请谨慎使用。记忆系统会自动总结对话，你只需在需要即时记录关键信息时调用工具。\n"
             )
 
-    @filter.on_message()
-    async def on_message(self, event: AstrMessageEvent):
-        """监听消息，收集对话到 FIFO"""
+        # 记录用户消息到 pending，等待 on_llm_response 配对
+        user_text = event.message_str or ""
+        if user_text:
+            self._pending_user_messages[event.unified_msg_origin] = {
+                "subject_id": subject_id,
+                "user_message": user_text,
+                "timestamp": event.timestamp or "",
+            }
+
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """LLM 响应后，配对用户消息和助手回复，写入 FIFO"""
         if not self._initialized:
-            await self.initialize()
+            return
 
-        # 只处理用户消息（避免处理自己的回复）
-        if event.is_at_or_wake:
-            # 这是被 @ 的消息，可能包含助手回复，跳过
-            pass
+        pending = self._pending_user_messages.pop(event.unified_msg_origin, None)
+        if not pending:
+            return
 
-        # 实际上 on_message 会在每条消息触发，包括用户和助手
-        # 我们需要在 on_llm_request 中记录助手回复，在 on_message 中记录用户消息
-        # 简化处理：利用 AstrBot 的 conversation_manager 获取最近一轮
-        # 这里采用更简单的方式：在 on_llm_request 时记录用户消息，在后续处理中记录助手回复
-        # 但为了简单，我们在 on_message 中只记录用户消息，助手回复通过其他方式获取
-        # 实际上更简单：每次用户发消息时，从 conversation history 取最后一轮
-        await self._collect_conversation_turn(event)
+        assistant_text = resp.completion_text or ""
 
-    async def _collect_conversation_turn(self, event: AstrMessageEvent):
-        """收集最近一轮对话到 FIFO"""
+        turn = ConversationTurn(
+            turn_id=generate_turn_id(),
+            user_message=pending["user_message"],
+            assistant_message=assistant_text,
+            timestamp=pending["timestamp"],
+            group_id=pending["subject_id"].split("#")[1] if "#" in pending["subject_id"] else None,
+        )
+
         try:
-            conv_mgr = self.context.conversation_manager
-            uid = event.unified_msg_origin
-            curr_cid = await conv_mgr.get_curr_conversation_id(uid)
-            conversation = await conv_mgr.get_conversation(uid, curr_cid)
-
-            if not conversation or not conversation.history:
-                return
-
-            history = json.loads(conversation.history)
-            if len(history) < 2:
-                return
-
-            # 取最后一轮 user + assistant
-            user_msg = ""
-            assistant_msg = ""
-            for msg in reversed(history):
-                role = msg.get("role", "")
-                if role == "assistant" and not assistant_msg:
-                    assistant_msg = self._extract_text(msg)
-                elif role == "user" and not user_msg:
-                    user_msg = self._extract_text(msg)
-                if user_msg and assistant_msg:
-                    break
-
-            if not user_msg:
-                return
-
-            subject_id = self._extract_subject_id(event)
-            turn = ConversationTurn(
-                turn_id=generate_turn_id(),
-                user_message=user_msg,
-                assistant_message=assistant_msg or "",
-                timestamp=event.timestamp or "",
-                group_id=subject_id.split("#")[1] if "#" in subject_id else None,
-            )
-
-            await self.fifo_repo.append_turn(subject_id, turn)
+            await self.fifo_repo.append_turn(pending["subject_id"], turn)
 
             # 检查是否触发总结
             if self.config.enable_auto_summary:
-                count = await self.fifo_repo.count(subject_id)
+                count = await self.fifo_repo.count(pending["subject_id"])
                 if count >= self.config.fifo_size:
                     # 后台异步总结，不阻塞
-                    asyncio.create_task(self._run_summary(subject_id))
-
+                    asyncio.create_task(self._run_summary(pending["subject_id"]))
         except Exception as e:
             logger.error(f"收集对话失败: {e}")
 
     async def _run_summary(self, subject_id: str):
-        """后台执行总结"""
-        try:
-            # 备份
-            await self.backup_service.create_backup()
+        """后台执行总结，带并发控制"""
+        if self._summary_semaphore is None:
+            self._summary_semaphore = asyncio.Semaphore(self.config.max_concurrent_summaries)
+        async with self._summary_semaphore:
+            try:
+                # 备份
+                await self.backup_service.create_backup()
 
-            # 读取 FIFO
-            turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
-            if not turns:
-                return
+                # 读取 FIFO
+                turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
+                if not turns:
+                    return
 
-            # 读取当前记忆
-            state = await self.mem_repo.get_state(subject_id)
+                # 读取当前记忆
+                state = await self.mem_repo.get_state(subject_id)
 
-            # 调用总结器
-            result = await self.summarizer.summarize(
-                turns, state, self.config.summary_mode
-            )
+                # 调用总结器
+                result = await self.summarizer.summarize(
+                    turns, state, self.config.summary_mode
+                )
 
-            # 应用结果
-            await self._apply_summary_result(subject_id, result)
+                # 应用结果
+                await self._apply_summary_result(subject_id, result)
 
-            # 清空 FIFO
-            await self.fifo_repo.clear(subject_id)
+                # 清空 FIFO
+                await self.fifo_repo.clear(subject_id)
 
-            logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
+                # 更新总结轮次计数，淘汰过期 fleeting
+                await self._evict_fleeting_by_ttl(subject_id)
 
-        except SummaryError as e:
-            logger.error(f"总结失败（已保留 FIFO）: {e}")
-        except Exception as e:
-            logger.error(f"总结异常: {e}")
+                logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
+
+            except SummaryError as e:
+                logger.error(f"总结失败（已保留 FIFO）: {e}")
+            except Exception as e:
+                logger.error(f"总结异常: {e}")
+
+    async def _evict_fleeting_by_ttl(self, subject_id: str):
+        """按 TTL 轮次淘汰 fleeting 记忆"""
+        self._summary_round_counter[subject_id] = self._summary_round_counter.get(subject_id, 0) + 1
+        rounds = self._summary_round_counter[subject_id]
+
+        if rounds >= self.config.fleeting_ttl_rounds:
+            # 清除该 subject 的所有 fleeting
+            entries = await self.mem_repo.get_by_subject(subject_id, "fleeting")
+            for e in entries:
+                await self.mem_repo.delete(e.memory_id)
+            logger.info(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {rounds} 轮）")
+            self._summary_round_counter[subject_id] = 0
 
     async def _apply_summary_result(self, subject_id: str, result):
         """应用总结结果到数据库"""
@@ -253,6 +251,7 @@ class SmartMemoryPlugin(Star):
                     if op.memory_id in index:
                         entry = index[op.memory_id]
                         entry.content = op.content or entry.content
+                        from datetime import datetime, timezone
                         entry.updated_at = datetime.now(timezone.utc).isoformat()
                         await self.mem_repo.upsert(entry)
                 elif op.action == "delete" and op.memory_id:
@@ -263,8 +262,8 @@ class SmartMemoryPlugin(Star):
         await self._evict_if_overflow(subject_id)
 
     async def _evict_if_overflow(self, subject_id: str):
-        """按层淘汰超出限制的记忆"""
-        for layer in ("important", "general", "fleeting"):
+        """按层淘汰超出限制的记忆（fleeting 不在这里淘汰，由 TTL 控制）"""
+        for layer in ("important", "general"):
             count = await self.mem_repo.count_by_subject_layer(subject_id, layer)
             if count > self.config.max_memory_per_layer:
                 entries = await self.mem_repo.get_by_subject(subject_id, layer)
@@ -448,18 +447,7 @@ class SmartMemoryPlugin(Star):
         msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
         return "group" if msg_type == "GroupMessage" else "private"
 
-    def _extract_text(self, msg: dict) -> str:
-        """从消息结构中提取纯文本"""
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    texts.append(item.get("text", ""))
-            return "\n".join(texts)
-        return str(content)
+
 
     async def terminate(self):
         """插件卸载"""

@@ -1,8 +1,8 @@
 {
     "memory_mode": {
         "description": "记忆共享模式。global=每个用户在不同群拥有独立记忆；shared=每个用户跨群共享同一套记忆",
-        "type": "enum",
-        "options": ["global", "shared"],
+        "type": "string",
+        "hint": "global 或 shared",
         "default": "global"
     },
     "fifo_size": {
@@ -14,8 +14,8 @@
     },
     "summary_mode": {
         "description": "记忆总结更新模式。search_replace=精准修改；full_replace=全量覆盖",
-        "type": "enum",
-        "options": ["search_replace", "full_replace"],
+        "type": "string",
+        "hint": "search_replace 或 full_replace",
         "default": "search_replace"
     },
     "inject_fifo_in_group": {
@@ -37,13 +37,37 @@
         "min": 10,
         "max": 200
     },
+    "fleeting_ttl_rounds": {
+        "description": "短暂记忆存活轮数。经历指定次数的总结后自动移除 fleeting 层记忆",
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 20
+    },
+    "max_concurrent_summaries": {
+        "description": "最大并发总结任务数。防止同时触发过多总结请求占用资源",
+        "type": "int",
+        "default": 2,
+        "min": 1,
+        "max": 10
+    },
     "summary_provider_id": {
         "description": "用于记忆总结的 LLM Provider ID。留空则使用 AstrBot 当前主对话模型",
         "type": "text",
         "default": ""
     },
     "summary_system_prompt": {
-        "description": "总结任务的额外系统提示词（可选）。会追加在默认提示词之后",
+        "description": "总结任务的额外系统提示词（可选）。会追加在默认系统提示词之后",
+        "type": "text",
+        "default": ""
+    },
+    "summary_search_replace_prompt": {
+        "description": "search_replace 模式的完整用户提示词模板（可选）。留空则使用默认模板。可用变量: {conversation_text}, {memory_snapshot}",
+        "type": "text",
+        "default": ""
+    },
+    "summary_full_replace_prompt": {
+        "description": "full_replace 模式的完整用户提示词模板（可选）。留空则使用默认模板。可用变量: {conversation_text}, {memory_snapshot}",
         "type": "text",
         "default": ""
     },
@@ -54,8 +78,8 @@
     },
     "inject_layers_in_group": {
         "description": "群聊时注入哪些记忆层到系统提示词",
-        "type": "enum",
-        "options": ["important_only", "important_general", "all"],
+        "type": "string",
+        "hint": "important_only, important_general 或 all",
         "default": "important_only"
     },
     "enable_auto_summary": {

@@ -1,5 +1,4 @@
 import json
-import asyncio
 from typing import List, Tuple, Optional
 from astrbot.api import logger
 from astrbot.api.star import Context
@@ -88,20 +87,25 @@ class Summarizer:
         else:
             return self._full_replace_prompt(conversation_text, memory_snapshot)
 
-    def _search_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+    def _default_search_replace_prompt(self) -> str:
         return (
             "请根据以下 [近期对话] 和 [现有记忆]，生成记忆更新操作列表。\n\n"
+            "各层写入标准：\n"
+            "- important：仅存放核心事实。如用户身份、关键偏好、重要约定、长期目标。"
+            "必须有明确证据且对用户画像/互动方式有长期影响。\n"
+            "- general：存放普通事实和常规互动。如日常爱好、一般性陈述、普通事件。\n"
+            "- fleeting：只允许 add，不允许 update/delete/keep。"
+            "尽可能详细记录近期对话中有用的信息（如临时任务、当前话题、短期状态、用户刚提到的细节）。"
+            "fleeting 记忆会在后续总结轮次中自动淘汰，因此只关注最新内容。\n\n"
             "规则：\n"
             "1. 只能返回 JSON，不要有任何额外解释\n"
             "2. 操作类型：add / update / delete / keep\n"
             "3. update 和 delete 必须引用准确的 memory_id\n"
-            "4. important 层只能存放核心事实（身份、关键偏好、重要约定）\n"
-            "5. general 层存放普通事实和常规互动\n"
-            "6. fleeting 层存放临时、即将过期内容\n"
-            "7. 不要 hallucinate，没有明确证据不要添加记忆\n"
-            "8. 如果某条现有记忆仍然准确且相关，使用 keep\n\n"
-            f"[近期对话]\n{conversation_text}\n\n"
-            f"[现有记忆]\n{memory_snapshot}\n\n"
+            "4. 不要 hallucinate，没有明确证据不要添加记忆\n"
+            "5. 如果某条现有记忆仍然准确且相关，使用 keep\n"
+            "6. fleeting 层只允许 add 操作\n\n"
+            "[近期对话]\n{conversation_text}\n\n"
+            "[现有记忆]\n{memory_snapshot}\n\n"
             "输出格式：\n"
             "{\n"
             '  "mode": "search_replace",\n'
@@ -110,22 +114,28 @@ class Summarizer:
             '    {"action": "add", "layer": "general", "content": "...", "category": "fact", "importance": 3},\n'
             '    {"action": "update", "memory_id": "mem-xxx", "content": "..."},\n'
             '    {"action": "delete", "memory_id": "mem-xxx"},\n'
-            '    {"action": "keep", "memory_id": "mem-xxx"}\n'
+            '    {"action": "keep", "memory_id": "mem-xxx"},\n'
+            '    {"action": "add", "layer": "fleeting", "content": "详细记录近期有用信息...", "category": "fact", "importance": 2}\n'
             "  ]\n"
             "}"
         )
 
-    def _full_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+    def _default_full_replace_prompt(self) -> str:
         return (
             "请根据以下 [近期对话] 和 [现有记忆]，生成完整的新的三层记忆结构。\n\n"
+            "各层写入标准：\n"
+            "- important：仅存放核心事实。如用户身份、关键偏好、重要约定、长期目标。"
+            "必须有明确证据且对用户画像/互动方式有长期影响。\n"
+            "- general：存放普通事实和常规互动。如日常爱好、一般性陈述、普通事件。\n"
+            "- fleeting：只允许新增，不保留旧条目。"
+            "尽可能详细记录近期对话中有用的信息（如临时任务、当前话题、短期状态、用户刚提到的细节）。"
+            "fleeting 记忆会在后续总结轮次中自动淘汰，因此只关注最新内容。\n\n"
             "规则：\n"
             "1. 只能返回 JSON，不要有任何额外解释\n"
-            "2. important 层只能存放核心事实\n"
-            "3. general 层存放普通事实\n"
-            "4. fleeting 层存放临时内容\n"
-            "5. 不要遗漏现有记忆中仍然准确且重要的内容\n\n"
-            f"[近期对话]\n{conversation_text}\n\n"
-            f"[现有记忆]\n{memory_snapshot}\n\n"
+            "2. 不要遗漏现有记忆中仍然准确且重要的内容\n"
+            "3. fleeting 层只保留本次需要新增的条目，不要复制旧 fleeting\n\n"
+            "[近期对话]\n{conversation_text}\n\n"
+            "[现有记忆]\n{memory_snapshot}\n\n"
             "输出格式：\n"
             "{\n"
             '  "mode": "full_replace",\n'
@@ -133,9 +143,27 @@ class Summarizer:
             '  "full_state": {\n'
             '    "important": [{"memory_id": "...", "content": "...", "category": "fact", "importance": 5, ...}],\n'
             '    "general": [...],\n'
-            '    "fleeting": [...]\n'
+            '    "fleeting": [{"memory_id": "...", "content": "详细记录近期有用信息...", "category": "fact", "importance": 2, ...}]\n'
             "  }\n"
             "}"
+        )
+
+    def _search_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+        template = self.config.summary_search_replace_prompt
+        if not template:
+            template = self._default_search_replace_prompt()
+        return template.format(
+            conversation_text=conversation_text,
+            memory_snapshot=memory_snapshot,
+        )
+
+    def _full_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+        template = self.config.summary_full_replace_prompt
+        if not template:
+            template = self._default_full_replace_prompt()
+        return template.format(
+            conversation_text=conversation_text,
+            memory_snapshot=memory_snapshot,
         )
 
     def _parse_result(self, data: dict, mode: str) -> SummaryResult:

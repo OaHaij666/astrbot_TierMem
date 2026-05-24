@@ -1,5 +1,4 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.event import MessageChain
+from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
 from core.config import PluginConfig
 from storage.memory_repo import MemoryRepository
