@@ -97,6 +97,44 @@ class MemoryTools:
             return f"已删除记忆 [{memory_id}]"
         return f"未找到记忆 {memory_id}"
 
+    async def memory_read_user(
+        self,
+        event,
+        user_id: str = "",
+        layer: str = "",
+    ) -> str:
+        """读取指定用户的记忆。在总结过程中如果发现需要更新其他用户的记忆时使用。
+
+        Args:
+            user_id: 目标用户的 ID
+            layer: 记忆层级过滤 (important/general/fleeting)，留空则返回全部
+        """
+        if not user_id:
+            return "user_id 不能为空"
+
+        # 构建 subject_id（假设与当前用户同场景）
+        from astrbot.api.event import AstrMessageEvent
+        uid = event.unified_msg_origin
+        parts = uid.split(":")
+        msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
+
+        if self.config.memory_mode == "shared":
+            subject_id = f"{user_id}#shared"
+        elif msg_type == "GroupMessage":
+            group_id = parts[-1] if parts else "unknown"
+            subject_id = f"{user_id}#{group_id}"
+        else:
+            subject_id = f"{user_id}#private"
+
+        entries = await self.mem_repo.get_by_subject(subject_id, layer or None)
+        if not entries:
+            return f"用户 {user_id} 在 {layer or '全部'} 层没有记忆记录。"
+
+        lines = [f"=== 用户 {user_id} 的 {layer or '全部'} 记忆 ==="]
+        for e in entries:
+            lines.append(f"[{e.layer}] {e.content[:80]} (id: {e.memory_id})")
+        return "\n".join(lines)
+
     def _extract_subject_id(self, event) -> str:
         from astrbot.api.event import AstrMessageEvent
         uid = event.unified_msg_origin

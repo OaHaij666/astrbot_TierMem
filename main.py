@@ -69,6 +69,9 @@ class SmartMemoryPlugin(Star):
         self._summary_semaphore = None
         self._summary_round_counter: Dict[str, int] = {}
 
+        # 记忆修改互斥锁：每个 subject_id 对应一个 asyncio.Lock
+        self._memory_locks: Dict[str, asyncio.Lock] = {}
+
     async def initialize(self):
         """插件初始化"""
         if self._initialized:
@@ -181,44 +184,53 @@ class SmartMemoryPlugin(Star):
         except Exception as e:
             logger.error(f"收集对话失败: {e}")
 
+    def _get_memory_lock(self, subject_id: str) -> asyncio.Lock:
+        """获取指定 subject_id 的记忆修改锁"""
+        if subject_id not in self._memory_locks:
+            self._memory_locks[subject_id] = asyncio.Lock()
+        return self._memory_locks[subject_id]
+
     async def _run_summary(self, subject_id: str):
-        """后台执行总结，带并发控制"""
+        """后台执行总结，带并发控制和互斥锁"""
         if self._summary_semaphore is None:
             max_concurrent = getattr(self.config, "max_concurrent_summaries", 2)
             self._summary_semaphore = asyncio.Semaphore(max_concurrent)
         async with self._summary_semaphore:
-            try:
-                # 备份
-                await self.backup_service.create_backup()
+            # 获取该 subject 的互斥锁，防止多个总结任务同时修改同一用户记忆
+            lock = self._get_memory_lock(subject_id)
+            async with lock:
+                try:
+                    # 备份
+                    await self.backup_service.create_backup()
 
-                # 读取 FIFO
-                turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
-                if not turns:
-                    return
+                    # 读取 FIFO
+                    turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
+                    if not turns:
+                        return
 
-                # 读取当前记忆
-                state = await self.mem_repo.get_state(subject_id)
+                    # 读取当前记忆
+                    state = await self.mem_repo.get_state(subject_id)
 
-                # 调用总结器
-                result = await self.summarizer.summarize(
-                    turns, state, self.config.summary_mode
-                )
+                    # 调用总结器
+                    result = await self.summarizer.summarize(
+                        turns, state, self.config.summary_mode
+                    )
 
-                # 应用结果
-                await self._apply_summary_result(subject_id, result)
+                    # 应用结果
+                    await self._apply_summary_result(subject_id, result)
 
-                # 清空 FIFO
-                await self.fifo_repo.clear(subject_id)
+                    # 清空 FIFO
+                    await self.fifo_repo.clear(subject_id)
 
-                # 更新总结轮次计数，淘汰过期 fleeting
-                await self._evict_fleeting_by_ttl(subject_id)
+                    # 更新总结轮次计数，淘汰过期 fleeting
+                    await self._evict_fleeting_by_ttl(subject_id)
 
-                logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
+                    logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
 
-            except SummaryError as e:
-                logger.error(f"总结失败（已保留 FIFO）: {e}")
-            except Exception as e:
-                logger.error(f"总结异常: {e}")
+                except SummaryError as e:
+                    logger.error(f"总结失败（已保留 FIFO）: {e}")
+                except Exception as e:
+                    logger.error(f"总结异常: {e}")
 
     async def _evict_fleeting_by_ttl(self, subject_id: str):
         """按 TTL 轮次淘汰 fleeting 记忆"""
@@ -427,6 +439,16 @@ class SmartMemoryPlugin(Star):
         memory_id: str = "",
     ) -> str:
         return await self.memory_tools.memory_delete(event, memory_id=memory_id)
+
+    @filter.llm_tool(name="memory_read_user")
+    async def tool_memory_read_user(
+        self,
+        event: AstrMessageEvent,
+        user_id: str = "",
+        layer: str = "",
+    ) -> str:
+        """读取指定用户的记忆。在总结过程中如果发现需要更新其他用户的记忆时使用。"""
+        return await self.memory_tools.memory_read_user(event, user_id=user_id, layer=layer)
 
     # ------------------------------------------------------------------
     # 辅助方法
