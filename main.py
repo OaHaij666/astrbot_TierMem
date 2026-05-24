@@ -2,9 +2,15 @@
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+
+# 确保插件内部包可被导入
+_plugin_dir = Path(__file__).parent.resolve()
+if str(_plugin_dir) not in sys.path:
+    sys.path.insert(0, str(_plugin_dir))
 
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
