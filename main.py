@@ -39,6 +39,10 @@ class SmartMemoryPlugin(Star):
     def __init__(self, context: Context, config: Dict[str, Any]):
         super().__init__(context)
         self.context = context
+
+        # 防御性处理：确保 config 是字典
+        if not isinstance(config, dict):
+            config = {}
         self.config = PluginConfig.from_astrbot_config(config)
 
         # 数据目录
@@ -91,9 +95,10 @@ class SmartMemoryPlugin(Star):
         )
         self.memory_tools = MemoryTools(self.config, self.mem_repo)
 
-        # 初始化信号量
+        # 初始化信号量（使用 getattr 防止 schema 解析失败导致字段缺失）
         if self._summary_semaphore is None:
-            self._summary_semaphore = asyncio.Semaphore(self.config.max_concurrent_summaries)
+            max_concurrent = getattr(self.config, "max_concurrent_summaries", 2)
+            self._summary_semaphore = asyncio.Semaphore(max_concurrent)
 
         self._initialized = True
         logger.info("SmartMemory 插件初始化完成")
@@ -179,7 +184,8 @@ class SmartMemoryPlugin(Star):
     async def _run_summary(self, subject_id: str):
         """后台执行总结，带并发控制"""
         if self._summary_semaphore is None:
-            self._summary_semaphore = asyncio.Semaphore(self.config.max_concurrent_summaries)
+            max_concurrent = getattr(self.config, "max_concurrent_summaries", 2)
+            self._summary_semaphore = asyncio.Semaphore(max_concurrent)
         async with self._summary_semaphore:
             try:
                 # 备份
@@ -219,7 +225,8 @@ class SmartMemoryPlugin(Star):
         self._summary_round_counter[subject_id] = self._summary_round_counter.get(subject_id, 0) + 1
         rounds = self._summary_round_counter[subject_id]
 
-        if rounds >= self.config.fleeting_ttl_rounds:
+        ttl = getattr(self.config, "fleeting_ttl_rounds", 3)
+        if rounds >= ttl:
             # 清除该 subject 的所有 fleeting
             entries = await self.mem_repo.get_by_subject(subject_id, "fleeting")
             for e in entries:
