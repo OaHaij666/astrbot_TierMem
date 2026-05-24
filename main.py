@@ -301,9 +301,12 @@ class SmartMemoryPlugin(Star):
             yield result
 
     @memory_group.command("check")
-    async def cmd_check(self, event: AstrMessageEvent, args: list = None):
+    async def cmd_check(self, event: AstrMessageEvent):
         """查看记忆"""
-        args = args or []
+        # 从消息文本解析参数，例如 /memory check important
+        text = event.message_str or ""
+        parts = text.strip().split()
+        args = parts[2:] if len(parts) > 2 else []
         result = await self.cmd_handler.handle(event, "check", args)
         yield result
 
@@ -330,16 +333,36 @@ class SmartMemoryPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.llm_tool(name="memory_add")
-    async def tool_memory_add(self, event: AstrMessageEvent, **kwargs):
-        return await self.memory_tools.memory_add(event, **kwargs)
+    async def tool_memory_add(
+        self,
+        event: AstrMessageEvent,
+        content: str = "",
+        layer: str = "general",
+        category: str = "fact",
+        importance: int = 3,
+    ) -> str:
+        return await self.memory_tools.memory_add(
+            event, content=content, layer=layer, category=category, importance=importance
+        )
 
     @filter.llm_tool(name="memory_update")
-    async def tool_memory_update(self, event: AstrMessageEvent, **kwargs):
-        return await self.memory_tools.memory_update(event, **kwargs)
+    async def tool_memory_update(
+        self,
+        event: AstrMessageEvent,
+        memory_id: str = "",
+        content: str = "",
+    ) -> str:
+        return await self.memory_tools.memory_update(
+            event, memory_id=memory_id, content=content
+        )
 
     @filter.llm_tool(name="memory_delete")
-    async def tool_memory_delete(self, event: AstrMessageEvent, **kwargs):
-        return await self.memory_tools.memory_delete(event, **kwargs)
+    async def tool_memory_delete(
+        self,
+        event: AstrMessageEvent,
+        memory_id: str = "",
+    ) -> str:
+        return await self.memory_tools.memory_delete(event, memory_id=memory_id)
 
     # ------------------------------------------------------------------
     # 辅助方法

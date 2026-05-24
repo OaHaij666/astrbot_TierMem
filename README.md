@@ -2,9 +2,6 @@
 
 AstrBot 插件 —— 主动总结 + 工具辅助的双轨记忆系统。
 
-> 作者：[OaHaij666](https://github.com/OaHaij666)  
-> 仓库：https://github.com/OaHaij666/astrbot_TierMem
-
 ---
 
 ## 记忆机制

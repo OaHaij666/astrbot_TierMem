@@ -1,4 +1,3 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
 from core.models import MemoryEntry
 from core.config import PluginConfig
@@ -7,14 +6,15 @@ from utils.id_gen import generate_memory_id
 
 
 class MemoryTools:
+    """LLM 工具方法集合（无装饰器，由主插件类统一注册）"""
+
     def __init__(self, config: PluginConfig, mem_repo: MemoryRepository):
         self.config = config
         self.mem_repo = mem_repo
 
-    @filter.llm_tool(name="memory_add")
     async def memory_add(
         self,
-        event: AstrMessageEvent,
+        event,
         content: str = "",
         layer: str = "general",
         category: str = "fact",
@@ -47,10 +47,9 @@ class MemoryTools:
         logger.info(f"[tool] memory_add: {entry.memory_id}")
         return f"已添加记忆 [{entry.memory_id}]: {content[:50]}..."
 
-    @filter.llm_tool(name="memory_update")
     async def memory_update(
         self,
-        event: AstrMessageEvent,
+        event,
         memory_id: str = "",
         content: str = "",
     ) -> str:
@@ -79,10 +78,9 @@ class MemoryTools:
         logger.info(f"[tool] memory_update: {memory_id}")
         return f"已更新记忆 [{memory_id}]"
 
-    @filter.llm_tool(name="memory_delete")
     async def memory_delete(
         self,
-        event: AstrMessageEvent,
+        event,
         memory_id: str = "",
     ) -> str:
         """谨慎使用：删除一条记忆。仅用于删除敏感、错误或重复的内容。
@@ -99,7 +97,8 @@ class MemoryTools:
             return f"已删除记忆 [{memory_id}]"
         return f"未找到记忆 {memory_id}"
 
-    def _extract_subject_id(self, event: AstrMessageEvent) -> str:
+    def _extract_subject_id(self, event) -> str:
+        from astrbot.api.event import AstrMessageEvent
         uid = event.unified_msg_origin
         parts = uid.split(":")
         user_id = parts[-1] if parts else "unknown"
@@ -110,8 +109,6 @@ class MemoryTools:
 
         if msg_type == "GroupMessage":
             group_id = parts[-1] if parts else "unknown"
-            # 群聊中 subject_id 是 user_id#group_id
-            # 需要从 event 中提取真实 user_id
             sender_id = event.get_sender_id() or user_id
             return f"{sender_id}#{group_id}"
         else:
