@@ -6,20 +6,19 @@ from typing import Literal
 class PluginConfig:
     memory_mode: Literal["global", "shared"] = "global"
     fifo_size: int = 10
-    summary_mode: Literal["search_replace", "full_replace"] = "search_replace"
     inject_fifo_in_group: bool = True
-    auto_summary_interval_minutes: int = 0
+    auto_summary_interval_minutes: int = -1
     max_memory_per_layer: int = 50
-    fleeting_ttl_rounds: int = 4           # 短暂记忆存活轮数（经历x次总结后自动移除）
-    max_concurrent_summaries: int = 3      # 最大并发总结任务数
+    fleeting_ttl_rounds: int = 4
+    max_concurrent_summaries: int = 3
 
     # LLM Provider 配置
-    summary_provider_id: str = ""           # 留空 = 使用 AstrBot 主对话模型
-    summary_system_prompt: str = ""         # 总结任务的额外系统提示词
+    summary_provider_id: str = ""
+    summary_system_prompt: str = ""
 
     # 总结提示词模板（留空则使用默认提示词）
-    summary_search_replace_prompt: str = ""   # search_replace 模式的完整提示词模板
-    summary_full_replace_prompt: str = ""     # full_replace 模式的完整提示词模板
+    summary_search_replace_prompt: str = ""
+    summary_full_replace_prompt: str = ""
 
     # 注入控制
     inject_memory_in_private: bool = True
@@ -36,9 +35,8 @@ class PluginConfig:
         return cls(
             memory_mode=config.get("memory_mode", "global"),
             fifo_size=config.get("fifo_size", 10),
-            summary_mode=config.get("summary_mode", "search_replace"),
             inject_fifo_in_group=config.get("inject_fifo_in_group", True),
-            auto_summary_interval_minutes=config.get("auto_summary_interval_minutes", 0),
+            auto_summary_interval_minutes=config.get("auto_summary_interval_minutes", -1),
             max_memory_per_layer=config.get("max_memory_per_layer", 50),
             fleeting_ttl_rounds=config.get("fleeting_ttl_rounds", 3),
             max_concurrent_summaries=config.get("max_concurrent_summaries", 2),

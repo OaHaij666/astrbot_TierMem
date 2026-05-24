@@ -1,104 +1,100 @@
 {
     "memory_mode": {
-        "description": "记忆共享模式。global=每个用户在不同群拥有独立记忆；shared=每个用户跨群共享同一套记忆",
+        "description": "记忆共享模式",
         "type": "string",
-        "hint": "global 或 shared",
-        "default": "global"
+        "default": "global",
+        "options": ["global", "shared"],
+        "hint": "global=各群独立记忆；shared=跨群共享记忆"
     },
     "fifo_size": {
-        "description": "FIFO 缓存对话轮数阈值，达到后自动触发总结",
+        "description": "近期对话队列长度，满后自动触发总结",
         "type": "int",
         "default": 10,
         "min": 3,
         "max": 50
     },
-    "summary_mode": {
-        "description": "记忆总结更新模式。search_replace=精准修改；full_replace=全量覆盖",
-        "type": "string",
-        "hint": "search_replace 或 full_replace",
-        "default": "search_replace"
-    },
     "inject_fifo_in_group": {
-        "description": "群聊时是否将 FIFO 近期对话注入提示词",
+        "description": "群聊时是否将近期未总结对话注入提示词",
         "type": "bool",
         "default": true
     },
     "auto_summary_interval_minutes": {
-        "description": "自动总结间隔分钟数（0 表示仅按 FIFO 长度触发）",
+        "description": "自动总结间隔分钟数（-1 表示不启用，0 表示仅按队列长度触发）",
         "type": "int",
-        "default": 0,
-        "min": 0,
+        "default": -1,
+        "min": -1,
         "max": 1440
     },
     "max_memory_per_layer": {
-        "description": "每层记忆最大条数，超出时按重要性淘汰",
+        "description": "每层记忆最大条数",
         "type": "int",
         "default": 50,
         "min": 10,
         "max": 200
     },
     "fleeting_ttl_rounds": {
-        "description": "短暂记忆存活轮数。经历指定次数的总结后自动移除 fleeting 层记忆",
+        "description": "短暂记忆存活轮数",
         "type": "int",
         "default": 3,
         "min": 1,
         "max": 20
     },
     "max_concurrent_summaries": {
-        "description": "最大并发总结任务数。防止同时触发过多总结请求占用资源",
+        "description": "最大并发总结任务数",
         "type": "int",
         "default": 2,
         "min": 1,
         "max": 10
     },
     "summary_provider_id": {
-        "description": "用于记忆总结的 LLM Provider ID。留空则使用 AstrBot 当前主对话模型",
+        "description": "总结用 LLM Provider ID，留空使用主模型",
         "type": "text",
         "default": ""
     },
     "summary_system_prompt": {
-        "description": "总结任务的额外系统提示词（可选）。会追加在默认系统提示词之后",
+        "description": "总结任务的额外系统提示词",
         "type": "text",
         "default": ""
     },
     "summary_search_replace_prompt": {
-        "description": "search_replace 模式的完整用户提示词模板（可选）。留空则使用默认模板。可用变量: {conversation_text}, {memory_snapshot}",
+        "description": "search_replace 模式提示词模板（留空用默认）",
         "type": "text",
         "default": ""
     },
     "summary_full_replace_prompt": {
-        "description": "full_replace 模式的完整用户提示词模板（可选）。留空则使用默认模板。可用变量: {conversation_text}, {memory_snapshot}",
+        "description": "full_replace 模式提示词模板（留空用默认）",
         "type": "text",
         "default": ""
     },
     "inject_memory_in_private": {
-        "description": "私聊时是否注入三层记忆到系统提示词",
+        "description": "私聊时是否注入三层记忆",
         "type": "bool",
         "default": true
     },
     "inject_layers_in_group": {
-        "description": "群聊时注入哪些记忆层到系统提示词",
+        "description": "群聊时注入的记忆层",
         "type": "string",
-        "hint": "important_only, important_general 或 all",
-        "default": "important_only"
+        "default": "important_only",
+        "options": ["important_only", "important_general", "all"],
+        "hint": "important_only=仅重要记忆；important_general=重要+一般；all=全部"
     },
     "enable_auto_summary": {
-        "description": "是否启用 FIFO 满自动触发总结",
+        "description": "是否启用队列满自动总结",
         "type": "bool",
         "default": true
     },
     "enable_manual_summary": {
-        "description": "是否允许用户通过 /memory sum 命令手动触发总结",
+        "description": "是否允许用户手动触发总结",
         "type": "bool",
         "default": true
     },
     "enable_llm_tools": {
-        "description": "是否向 LLM 暴露 memory_add / memory_update / memory_delete 工具",
+        "description": "是否向 LLM 暴露记忆管理工具",
         "type": "bool",
         "default": true
     },
     "tool_caution_in_prompt": {
-        "description": "是否在系统提示词中附加工具使用警告，提醒 LLM 谨慎使用",
+        "description": "是否附加工具使用警告",
         "type": "bool",
         "default": true
     }

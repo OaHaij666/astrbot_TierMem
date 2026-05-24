@@ -211,9 +211,9 @@ class SmartMemoryPlugin(Star):
                     # 读取当前记忆
                     state = await self.mem_repo.get_state(subject_id)
 
-                    # 调用总结器
+                    # 调用总结器（LLM 自行选择 search_replace 或 full_replace）
                     result = await self.summarizer.summarize(
-                        turns, state, self.config.summary_mode
+                        turns, state
                     )
 
                     # 应用结果

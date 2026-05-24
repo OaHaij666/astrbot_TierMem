@@ -29,13 +29,12 @@ class Summarizer:
         self,
         turns: List[ConversationTurn],
         current_state: MemoryState,
-        mode: str,
     ) -> SummaryResult:
         provider = await self._get_summary_provider()
         if not provider:
             raise ProviderNotFoundError("无法获取总结用 LLM Provider")
 
-        prompt = self._build_prompt(turns, current_state, mode)
+        prompt = self._build_prompt(turns, current_state)
         system_prompt = self._build_system_prompt()
 
         try:
@@ -54,6 +53,10 @@ class Summarizer:
         parsed = safe_json_loads(raw)
         if not parsed:
             raise SummaryError(f"无法解析 LLM 返回的 JSON: {raw[:200]}")
+
+        mode = parsed.get("mode", "search_replace")
+        if mode not in ("search_replace", "full_replace"):
+            mode = "search_replace"
 
         result = self._parse_result(parsed, mode)
 
@@ -78,16 +81,23 @@ class Summarizer:
             base += f"\n\n{self.config.summary_system_prompt}"
         return base
 
-    def _build_prompt(self, turns: List[ConversationTurn], state: MemoryState, mode: str) -> str:
+    def _build_prompt(self, turns: List[ConversationTurn], state: MemoryState) -> str:
         conversation_text = "\n".join(t.to_prompt_text() for t in turns)
         memory_snapshot = json.dumps(state.to_dict(), ensure_ascii=False, indent=2)
 
-        if mode == "search_replace":
-            return self._search_replace_prompt(conversation_text, memory_snapshot)
-        else:
-            return self._full_replace_prompt(conversation_text, memory_snapshot)
+        if self.config.summary_search_replace_prompt:
+            return self.config.summary_search_replace_prompt.format(
+                conversation_text=conversation_text,
+                memory_snapshot=memory_snapshot,
+            )
+        if self.config.summary_full_replace_prompt:
+            return self.config.summary_full_replace_prompt.format(
+                conversation_text=conversation_text,
+                memory_snapshot=memory_snapshot,
+            )
+        return self._default_prompt(conversation_text, memory_snapshot)
 
-    def _default_search_replace_prompt(self) -> str:
+    def _default_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
         return (
             "你就是这个对话中的 AI 助手（bot）。请站在你自己的视角，根据 [近期对话] 和 [你对当前用户的现有记忆]，"
             "更新你对这个用户的记忆。\n\n"
@@ -95,6 +105,9 @@ class Summarizer:
             "- 使用第一人称视角，例如『用户喜欢...』『用户告诉我...』\n"
             "- 你是记忆的拥有者，这些记忆帮助你更好地与用户互动\n"
             "- 不要以第三者旁观者的口吻描述\n\n"
+            "更新模式（自行选择）：\n"
+            "- search_replace：精准修改。适用于大部分情况，对现有记忆进行增删改查。\n"
+            "- full_replace：全量覆盖。适用于现有记忆已严重过时、需要完全重建时。\n\n"
             "各层写入标准：\n"
             "- important：仅存放核心事实。如用户身份、关键偏好、重要约定、长期目标。"
             "必须有明确证据且对用户画像/互动方式有长期影响。\n"
@@ -108,14 +121,15 @@ class Summarizer:
             "- 注意：对记忆的修改是互斥的，同一时间只能有一个总结任务在修改某个用户的记忆\n\n"
             "规则：\n"
             "1. 只能返回 JSON，不要有任何额外解释\n"
-            "2. 操作类型：add / update / delete / keep\n"
-            "3. update 和 delete 必须引用准确的 memory_id\n"
-            "4. 不要 hallucinate，没有明确证据不要添加记忆\n"
-            "5. 如果某条现有记忆仍然准确且相关，使用 keep\n"
-            "6. fleeting 层只允许 add 操作\n\n"
+            "2. search_replace 模式操作类型：add / update / delete / keep\n"
+            "3. full_replace 模式需提供完整的 full_state 三层结构\n"
+            "4. update 和 delete 必须引用准确的 memory_id\n"
+            "5. 不要 hallucinate，没有明确证据不要添加记忆\n"
+            "6. 如果某条现有记忆仍然准确且相关，使用 keep\n"
+            "7. fleeting 层只允许 add 操作\n\n"
             "[近期对话]\n{conversation_text}\n\n"
             "[现有记忆]\n{memory_snapshot}\n\n"
-            "输出格式：\n"
+            "输出格式（search_replace 模式）：\n"
             "{\n"
             '  "mode": "search_replace",\n'
             '  "summary": "总结说明",\n'
@@ -126,35 +140,8 @@ class Summarizer:
             '    {"action": "keep", "memory_id": "mem-xxx"},\n'
             '    {"action": "add", "layer": "fleeting", "content": "详细记录近期有用信息...", "category": "fact", "importance": 2}\n'
             "  ]\n"
-            "}"
-        )
-
-    def _default_full_replace_prompt(self) -> str:
-        return (
-            "你就是这个对话中的 AI 助手（bot）。请站在你自己的视角，根据 [近期对话] 和 [你对当前用户的现有记忆]，"
-            "生成完整的新的三层记忆结构。\n\n"
-            "视角要求：\n"
-            "- 使用第一人称视角，例如『用户喜欢...』『用户告诉我...』\n"
-            "- 你是记忆的拥有者，这些记忆帮助你更好地与用户互动\n"
-            "- 不要以第三者旁观者的口吻描述\n\n"
-            "各层写入标准：\n"
-            "- important：仅存放核心事实。如用户身份、关键偏好、重要约定、长期目标。"
-            "必须有明确证据且对用户画像/互动方式有长期影响。\n"
-            "- general：存放普通事实和常规互动。如日常爱好、一般性陈述、普通事件。\n"
-            "- fleeting：只允许新增，不保留旧条目。"
-            "尽可能详细记录近期对话中有用的信息（如临时任务、当前话题、短期状态、用户刚提到的细节）。"
-            "fleeting 记忆会在后续总结轮次中自动淘汰，因此只关注最新内容。\n\n"
-            "跨用户记忆：\n"
-            "- 如果对话中提及其他用户的信息，且你认为需要记录到该用户的记忆中，"
-            "请使用 memory_read_user 工具先读取该用户的记忆，再决定如何更新\n"
-            "- 注意：对记忆的修改是互斥的，同一时间只能有一个总结任务在修改某个用户的记忆\n\n"
-            "规则：\n"
-            "1. 只能返回 JSON，不要有任何额外解释\n"
-            "2. 不要遗漏现有记忆中仍然准确且重要的内容\n"
-            "3. fleeting 层只保留本次需要新增的条目，不要复制旧 fleeting\n\n"
-            "[近期对话]\n{conversation_text}\n\n"
-            "[现有记忆]\n{memory_snapshot}\n\n"
-            "输出格式：\n"
+            "}\n\n"
+            "输出格式（full_replace 模式）：\n"
             "{\n"
             '  "mode": "full_replace",\n'
             '  "summary": "总结说明",\n'
@@ -166,29 +153,10 @@ class Summarizer:
             "}"
         )
 
-    def _search_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
-        template = self.config.summary_search_replace_prompt
-        if not template:
-            template = self._default_search_replace_prompt()
-        return template.format(
-            conversation_text=conversation_text,
-            memory_snapshot=memory_snapshot,
-        )
-
-    def _full_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
-        template = self.config.summary_full_replace_prompt
-        if not template:
-            template = self._default_full_replace_prompt()
-        return template.format(
-            conversation_text=conversation_text,
-            memory_snapshot=memory_snapshot,
-        )
-
     def _parse_result(self, data: dict, mode: str) -> SummaryResult:
         return SummaryResult.from_dict(data, mode)
 
     def _validate_state(self, old: MemoryState, new: MemoryState) -> Tuple[bool, str]:
-        # L1 记忆数量异常减少则拒绝
         old_important = len(old.important)
         new_important = len(new.important)
         if new_important < old_important * 0.5 and old_important > 0:
