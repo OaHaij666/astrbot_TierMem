@@ -161,6 +161,7 @@ class SummaryResult:
     summary: str = ""
     operations: List[SummaryOperation] = field(default_factory=list)
     full_state: Optional[MemoryState] = None
+    cross_user_operations: Dict[str, List[SummaryOperation]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], mode: str) -> "SummaryResult":
@@ -168,9 +169,15 @@ class SummaryResult:
         full_state = None
         if mode == "full_replace" and "full_state" in data:
             full_state = MemoryState.from_dict(data["full_state"])
+        cross_ops: Dict[str, List[SummaryOperation]] = {}
+        raw_cross = data.get("cross_user_operations", {})
+        if isinstance(raw_cross, dict):
+            for uid, op_list in raw_cross.items():
+                cross_ops[uid] = [SummaryOperation.from_dict(o) for o in op_list]
         return cls(
             mode=mode,
             summary=data.get("summary", ""),
             operations=ops,
             full_state=full_state,
+            cross_user_operations=cross_ops,
         )

@@ -18,13 +18,6 @@
         "type": "bool",
         "default": true
     },
-    "auto_summary_interval_minutes": {
-        "description": "自动总结间隔分钟数（-1 表示不启用，0 表示仅按队列长度触发）",
-        "type": "int",
-        "default": -1,
-        "min": -1,
-        "max": 1440
-    },
     "max_memory_per_layer": {
         "description": "每层记忆最大条数",
         "type": "int",
@@ -97,5 +90,12 @@
         "description": "是否附加工具使用警告",
         "type": "bool",
         "default": true
+    },
+    "memory_overflow_policy": {
+        "description": "记忆超限处理策略：evict=按重要性+时间淘汰；condense=调用LLM浓缩合并",
+        "type": "string",
+        "default": "evict",
+        "options": ["evict", "condense"],
+        "hint": "evict=按(importance,updated_at)淘汰最不重要的；condense=调用LLM合并语义相似的记忆"
     }
 }

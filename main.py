@@ -32,10 +32,17 @@ from api.tools import MemoryTools
 from api.commands import CommandHandler
 
 from utils.id_gen import generate_turn_id
+from utils.subject import extract_subject_id, detect_scene, build_cross_subject_id
 
+
+from collections import OrderedDict
 
 @register("astrbot_TierMem", "TierMem", "主动总结 + 工具辅助的双轨记忆系统", "1.0.0")
 class SmartMemoryPlugin(Star):
+    _SUMMARY_MAX_CONSECUTIVE_FAILURES = 3
+    _NICKNAME_CACHE_MAX = 2000
+    _LOCK_CLEANUP_INTERVAL = 100
+
     def __init__(self, context: Context, config: Dict[str, Any]):
         super().__init__(context)
         self.context = context
@@ -67,10 +74,15 @@ class SmartMemoryPlugin(Star):
 
         # 并发控制（延迟初始化，避免事件循环问题）
         self._summary_semaphore = None
-        self._summary_round_counter: Dict[str, int] = {}
 
         # 记忆修改互斥锁：每个 subject_id 对应一个 asyncio.Lock
         self._memory_locks: Dict[str, asyncio.Lock] = {}
+
+        # 昵称缓存：uid -> nickname，用于注入时替换 {{uid:xxx}}
+        self._nickname_cache: OrderedDict[str, str] = OrderedDict()
+
+        # 总结连续失败计数器：subject_id -> count，防止死循环重试
+        self._summary_failure_count: Dict[str, int] = {}
 
     async def initialize(self):
         """插件初始化"""
@@ -119,10 +131,13 @@ class SmartMemoryPlugin(Star):
         if not self._initialized:
             await self.initialize()
 
-        subject_id = self._extract_subject_id(event)
-        scene = self._detect_scene(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
+        scene = detect_scene(event)
 
-        # 读取记忆
+        self._update_nickname_cache(event)
+
+        self.injector.update_nickname_cache(self._nickname_cache)
+
         state = await self.mem_repo.get_state(subject_id)
 
         # 群聊时读取 FIFO
@@ -146,11 +161,13 @@ class SmartMemoryPlugin(Star):
         # 记录用户消息到 pending，等待 on_llm_response 配对
         user_text = event.message_str or ""
         if user_text:
-            self._pending_user_messages[event.unified_msg_origin] = {
+            origin = event.unified_msg_origin
+            self._pending_user_messages[origin] = {
                 "subject_id": subject_id,
                 "user_message": user_text,
                 "timestamp": getattr(event, "timestamp", None) or "",
             }
+            asyncio.create_task(self._cleanup_pending_after(origin, 120))
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -187,8 +204,17 @@ class SmartMemoryPlugin(Star):
     def _get_memory_lock(self, subject_id: str) -> asyncio.Lock:
         """获取指定 subject_id 的记忆修改锁"""
         if subject_id not in self._memory_locks:
+            if len(self._memory_locks) >= self._LOCK_CLEANUP_INTERVAL:
+                for key in list(self._memory_locks.keys()):
+                    lock = self._memory_locks[key]
+                    if not lock.locked():
+                        del self._memory_locks[key]
             self._memory_locks[subject_id] = asyncio.Lock()
         return self._memory_locks[subject_id]
+
+    async def _cleanup_pending_after(self, origin: str, delay: int):
+        await asyncio.sleep(delay)
+        self._pending_user_messages.pop(origin, None)
 
     async def _run_summary(self, subject_id: str):
         """后台执行总结，带并发控制和互斥锁"""
@@ -200,8 +226,8 @@ class SmartMemoryPlugin(Star):
             lock = self._get_memory_lock(subject_id)
             async with lock:
                 try:
-                    # 备份
                     await self.backup_service.create_backup()
+                    self.backup_service.cleanup_old_backups(keep=5)
 
                     # 读取 FIFO
                     turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
@@ -218,7 +244,7 @@ class SmartMemoryPlugin(Star):
 
                     # 调用总结器（LLM 自行选择 search_replace 或 full_replace）
                     result = await self.summarizer.summarize(
-                        turns, state
+                        turns, state, subject_id, self.mem_repo, self.config.memory_mode
                     )
 
                     # 应用结果
@@ -232,27 +258,57 @@ class SmartMemoryPlugin(Star):
 
                     logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
 
+                    self._summary_failure_count.pop(subject_id, None)
+
                 except SummaryError as e:
-                    logger.error(f"总结失败（已保留 FIFO）: {e}")
+                    self._summary_failure_count[subject_id] = self._summary_failure_count.get(subject_id, 0) + 1
+                    fails = self._summary_failure_count[subject_id]
+                    logger.error(f"总结失败（连续 {fails} 次）: {e}")
                 except Exception as e:
-                    logger.error(f"总结异常: {e}")
+                    self._summary_failure_count[subject_id] = self._summary_failure_count.get(subject_id, 0) + 1
+                    fails = self._summary_failure_count[subject_id]
+                    logger.error(f"总结异常（连续 {fails} 次）: {e}")
+                else:
+                    return
+
+                if fails >= self._SUMMARY_MAX_CONSECUTIVE_FAILURES:
+                    await self.fifo_repo.clear(subject_id)
+                    self._summary_failure_count[subject_id] = 0
+                    logger.warning(f"总结连续失败 {fails} 次，已清空 FIFO: {subject_id}")
+                else:
+                    await self.fifo_repo.delete_oldest(subject_id, self.config.fifo_size)
+                    logger.info(f"总结失败，FIFO trim 到最新 {self.config.fifo_size} 轮: {subject_id}")
 
     async def _evict_fleeting_by_ttl(self, subject_id: str):
-        """按 TTL 轮次淘汰 fleeting 记忆"""
-        self._summary_round_counter[subject_id] = self._summary_round_counter.get(subject_id, 0) + 1
-        rounds = self._summary_round_counter[subject_id]
+        key = f"fleeting_round_{subject_id}"
+        current = await self._load_meta_int(key, 0)
+        current += 1
+        await self._save_meta(key, str(current))
 
         ttl = getattr(self.config, "fleeting_ttl_rounds", 3)
-        if rounds >= ttl:
-            # 清除该 subject 的所有 fleeting
+        if current >= ttl:
             entries = await self.mem_repo.get_by_subject(subject_id, "fleeting")
             for e in entries:
                 await self.mem_repo.delete(e.memory_id)
-            logger.info(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {rounds} 轮）")
-            self._summary_round_counter[subject_id] = 0
+            logger.info(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {current} 轮）")
+            await self._save_meta(key, "0")
+
+    async def _load_meta_int(self, key: str, default: int) -> int:
+        async with self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["value"]) if row and row["value"] else default
+
+    async def _save_meta(self, key: str, value: str) -> None:
+        await self.db.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self.db.conn.commit()
 
     async def _apply_summary_result(self, subject_id: str, result):
-        """应用总结结果到数据库"""
         if result.mode == "full_replace" and result.full_state:
             await self.mem_repo.replace_state(subject_id, result.full_state)
         elif result.mode == "search_replace":
@@ -280,23 +336,90 @@ class SmartMemoryPlugin(Star):
                         await self.mem_repo.upsert(entry)
                 elif op.action == "delete" and op.memory_id:
                     await self.mem_repo.delete(op.memory_id)
-                # keep: 什么都不做
 
-        # 淘汰溢出
+        if result.cross_user_operations:
+            await self._apply_cross_user_operations(subject_id, result.cross_user_operations)
+
         await self._evict_if_overflow(subject_id)
 
+    async def _apply_cross_user_operations(self, current_subject_id: str, cross_ops: dict):
+        from datetime import datetime, timezone
+
+        current_parts = current_subject_id.split("#")
+        current_group = current_parts[1] if len(current_parts) > 1 and current_parts[1] not in ("shared", "private") else "unknown"
+
+        for user_id, ops in cross_ops.items():
+            if not ops:
+                continue
+
+            if self.config.memory_mode == "shared":
+                target_subject = f"{user_id}#shared"
+            else:
+                target_subject = f"{user_id}#{current_group}"
+
+            lock = self._get_memory_lock(target_subject)
+            async with lock:
+                state = await self.mem_repo.get_state(target_subject)
+                index = {e.memory_id: e for e in state.all_entries()}
+
+                for op in ops:
+                    if op.action == "add":
+                        entry = MemoryEntry(
+                            memory_id=generate_turn_id().replace("turn", "mem"),
+                            content=op.content or "",
+                            layer=op.layer or "general",
+                            category=op.category or "fact",
+                            importance=op.importance or 3,
+                            subject_id=target_subject,
+                            source="auto_summary",
+                        )
+                        await self.mem_repo.upsert(entry)
+                        logger.info(f"跨用户 add: {target_subject} memory={entry.memory_id}")
+                    elif op.action == "update" and op.memory_id:
+                        if op.memory_id in index:
+                            entry = index[op.memory_id]
+                            entry.content = op.content or entry.content
+                            entry.updated_at = datetime.now(timezone.utc).isoformat()
+                            await self.mem_repo.upsert(entry)
+                            logger.info(f"跨用户 update: {target_subject} memory={op.memory_id}")
+                    elif op.action == "delete" and op.memory_id:
+                        if op.memory_id in index:
+                            await self.mem_repo.delete(op.memory_id)
+                            logger.info(f"跨用户 delete: {target_subject} memory={op.memory_id}")
+
+                await self._evict_if_overflow(target_subject)
+
     async def _evict_if_overflow(self, subject_id: str):
-        """按层淘汰超出限制的记忆（fleeting 不在这里淘汰，由 TTL 控制）"""
         for layer in ("important", "general"):
             count = await self.mem_repo.count_by_subject_layer(subject_id, layer)
-            if count > self.config.max_memory_per_layer:
-                entries = await self.mem_repo.get_by_subject(subject_id, layer)
-                # 按 importance 升序，再按 updated_at 升序，淘汰老的
-                entries.sort(key=lambda e: (e.importance, e.updated_at))
-                to_delete = entries[: count - self.config.max_memory_per_layer]
-                for e in to_delete:
-                    await self.mem_repo.delete(e.memory_id)
-                    logger.info(f"淘汰记忆: {e.memory_id}")
+            if count <= self.config.max_memory_per_layer:
+                continue
+
+            entries = await self.mem_repo.get_by_subject(subject_id, layer)
+
+            if self.config.memory_overflow_policy == "condense":
+                try:
+                    condensed = await self.summarizer.condense(
+                        entries, self.config.max_memory_per_layer, layer
+                    )
+                    await self.mem_repo.replace_layer(subject_id, layer, condensed)
+                    logger.info(f"浓缩完成: {subject_id} {layer} 层 {len(entries)} -> {len(condensed)} 条")
+                except Exception as e:
+                    logger.warning(f"浓缩失败，回退到淘汰: {e}")
+                    await self._hard_evict(entries, count, subject_id, layer)
+            else:
+                await self._hard_evict(entries, count, subject_id, layer)
+
+    async def _hard_evict(self, entries, count: int, subject_id: str, layer: str):
+        entries.sort(key=lambda e: (e.importance, e.updated_at))
+        to_delete = entries[: count - self.config.max_memory_per_layer]
+        tasks = []
+        for e in to_delete:
+            tasks.append(self.mem_repo.delete(e.memory_id))
+        if tasks:
+            await asyncio.gather(*tasks)
+        for e in to_delete:
+            logger.info(f"淘汰记忆: {e.memory_id}")
 
     # ------------------------------------------------------------------
     # 命令
@@ -313,7 +436,7 @@ class SmartMemoryPlugin(Star):
             yield event.plain_result("手动总结功能已禁用。")
             return
 
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         asyncio.create_task(self._run_summary(subject_id))
         yield event.plain_result("总结任务已在后台启动。")
 
@@ -325,19 +448,64 @@ class SmartMemoryPlugin(Star):
 
     @memory_group.command("check")
     async def cmd_check(self, event: AstrMessageEvent):
-        """查看记忆"""
-        # 从消息文本解析参数，例如 /memory check important
         text = event.message_str or ""
         parts = text.strip().split()
         args = parts[2:] if len(parts) > 2 else []
+
+        target_user_id = None
+        layer = None
+        for arg in args:
+            if arg.startswith("@"):
+                target_user_id = arg.lstrip("@")
+            else:
+                layer = arg
+
+        if target_user_id:
+            if not event.is_admin():
+                yield event.plain_result("无权查看其他用户的记忆，需要管理员权限。")
+                return
+
+            current_subject_id = extract_subject_id(event, self.config.memory_mode)
+            target_subject = build_cross_subject_id(
+                target_user_id, current_subject_id, self.config.memory_mode
+            )
+
+            if layer and layer not in ("important", "general", "fleeting"):
+                yield event.plain_result(f"无效层级: {layer}。可选: important, general, fleeting")
+                return
+
+            entries = await self.mem_repo.get_by_subject(target_subject, layer or None)
+            if not entries:
+                yield event.plain_result(f"用户 {target_user_id} 在 {layer or '全部'} 层无记忆记录。")
+                return
+
+            lines = [f"=== 用户 {target_user_id} 的 {layer or '全部'} 记忆 ==="]
+            for e in entries:
+                lines.append(f"[{e.layer}] {e.content[:80]} (id: {e.memory_id})")
+            yield event.plain_result("\n".join(lines))
+            return
+
         result = await self.cmd_handler.handle(event, "check", args)
         yield result
 
     @memory_group.command("rollback")
     async def cmd_rollback(self, event: AstrMessageEvent):
         """回滚记忆"""
-        result = await self.cmd_handler.handle(event, "rollback", [])
-        yield result
+        try:
+            await self.db.close()
+            await self.backup_service.restore_latest()
+            self.db = await SQLiteDB(self.db_path).connect()
+            self.mem_repo = MemoryRepository(self.db.conn)
+            self.fifo_repo = FifoRepository(self.db.conn)
+            self.backup_service = BackupService(self.db, self.data_dir / "backup")
+            self.cmd_handler = CommandHandler(
+                self.config, self.mem_repo, self.fifo_repo, self.backup_service
+            )
+            self.memory_tools = MemoryTools(self.config, self.mem_repo)
+            yield event.plain_result("已回滚到上次备份，数据库连接已重新建立。")
+        except Exception as e:
+            logger.error(f"回滚失败: {e}")
+            yield event.plain_result(f"回滚失败: {e}")
 
     @memory_group.command("status")
     async def cmd_status(self, event: AstrMessageEvent):
@@ -409,6 +577,27 @@ class SmartMemoryPlugin(Star):
             logger.info(f"管理员 {event.get_sender_id()} 清除了用户 {target} 的记忆")
             yield event.plain_result(f"已清除用户 {target} 的记忆和 FIFO（共 {len(subjects)} 个上下文）。")
 
+    @memory_group.command("condense")
+    async def cmd_condense(self, event: AstrMessageEvent):
+        """手动触发记忆浓缩（对 important 和 general 层）"""
+        subject_id = extract_subject_id(event, self.config.memory_mode)
+        results = []
+        for layer in ("important", "general"):
+            entries = await self.mem_repo.get_by_subject(subject_id, layer)
+            before = len(entries)
+            if before <= self.config.max_memory_per_layer:
+                results.append(f"{layer}: {before} 条，未超限，无需浓缩")
+                continue
+            try:
+                condensed = await self.summarizer.condense(
+                    entries, self.config.max_memory_per_layer, layer
+                )
+                await self.mem_repo.replace_layer(subject_id, layer, condensed)
+                results.append(f"{layer}: {before} -> {len(condensed)} 条")
+            except Exception as e:
+                results.append(f"{layer}: 浓缩失败 - {e}")
+        yield event.plain_result("记忆浓缩完成:\n" + "\n".join(results))
+
     @memory_group.command("help")
     async def cmd_help(self, event: AstrMessageEvent):
         """帮助"""
@@ -465,27 +654,32 @@ class SmartMemoryPlugin(Star):
     # 辅助方法
     # ------------------------------------------------------------------
 
+    def _update_nickname_cache(self, event: AstrMessageEvent):
+        sender_id = event.get_sender_id()
+        if not sender_id:
+            return
+        name = None
+        for attr in ("sender_name", "nickname", "group_nickname"):
+            val = getattr(event, attr, None)
+            if val:
+                name = val
+                break
+        if not name:
+            sender = getattr(event, "sender", None)
+            if sender:
+                name = getattr(sender, "nickname", None) or getattr(sender, "member_name", None)
+        if not name:
+            name = sender_id
+
+        if sender_id in self._nickname_cache:
+            self._nickname_cache.move_to_end(sender_id)
+        self._nickname_cache[sender_id] = name
+
+        while len(self._nickname_cache) > self._NICKNAME_CACHE_MAX:
+            self._nickname_cache.popitem(last=False)
+
     def _extract_subject_id(self, event: AstrMessageEvent) -> str:
-        uid = event.unified_msg_origin
-        parts = uid.split(":")
-        user_id = parts[-1] if parts else "unknown"
-        msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
-
-        if self.config.memory_mode == "shared":
-            return f"{user_id}#shared"
-
-        if msg_type == "GroupMessage":
-            group_id = parts[-1] if parts else "unknown"
-            sender_id = event.get_sender_id() or user_id
-            return f"{sender_id}#{group_id}"
-        else:
-            return f"{user_id}#private"
-
-    def _detect_scene(self, event: AstrMessageEvent) -> str:
-        uid = event.unified_msg_origin
-        parts = uid.split(":")
-        msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
-        return "group" if msg_type == "GroupMessage" else "private"
+        return extract_subject_id(event, self.config.memory_mode)
 
 
 

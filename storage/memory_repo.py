@@ -73,10 +73,64 @@ class MemoryRepository:
         return cursor.rowcount > 0
 
     async def replace_state(self, subject_id: str, state: MemoryState) -> None:
-        await self.db.execute("DELETE FROM memories WHERE subject_id = ?", (subject_id,))
-        for entry in state.all_entries():
-            entry.subject_id = subject_id
-            await self.upsert(entry)
+        await self.db.execute("BEGIN IMMEDIATE")
+        try:
+            await self.db.execute("DELETE FROM memories WHERE subject_id = ?", (subject_id,))
+            for entry in state.all_entries():
+                entry.subject_id = subject_id
+                await self._upsert_no_commit(entry)
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+    async def replace_layer(self, subject_id: str, layer: str, entries: List[MemoryEntry]) -> None:
+        await self.db.execute("BEGIN IMMEDIATE")
+        try:
+            await self.db.execute(
+                "DELETE FROM memories WHERE subject_id = ? AND layer = ?",
+                (subject_id, layer),
+            )
+            for entry in entries:
+                entry.subject_id = subject_id
+                entry.layer = layer
+                await self._upsert_no_commit(entry)
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+    async def _upsert_no_commit(self, entry: MemoryEntry) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO memories (memory_id, content, layer, category, importance, subject_id,
+                                  created_at, updated_at, expires_at, source, confidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+                content = excluded.content,
+                layer = excluded.layer,
+                category = excluded.category,
+                importance = excluded.importance,
+                subject_id = excluded.subject_id,
+                updated_at = excluded.updated_at,
+                expires_at = excluded.expires_at,
+                source = excluded.source,
+                confidence = excluded.confidence
+            """,
+            (
+                entry.memory_id,
+                entry.content,
+                entry.layer,
+                entry.category,
+                entry.importance,
+                entry.subject_id,
+                entry.created_at,
+                entry.updated_at,
+                entry.expires_at,
+                entry.source,
+                entry.confidence,
+            ),
+        )
 
     async def list_all_subjects(self) -> List[str]:
         async with self.db.execute(

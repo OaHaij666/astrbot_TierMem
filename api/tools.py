@@ -3,6 +3,7 @@ from core.models import MemoryEntry
 from core.config import PluginConfig
 from storage.memory_repo import MemoryRepository
 from utils.id_gen import generate_memory_id
+from utils.subject import extract_subject_id
 
 
 class MemoryTools:
@@ -33,7 +34,7 @@ class MemoryTools:
         if layer not in ("important", "general", "fleeting"):
             return f"无效的 layer: {layer}"
 
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         entry = MemoryEntry(
             memory_id=generate_memory_id(),
             content=content,
@@ -62,7 +63,7 @@ class MemoryTools:
         if not memory_id or not content:
             return "memory_id 和 content 不能为空"
 
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         entries = await self.mem_repo.get_by_subject(subject_id)
         target = None
         for e in entries:
@@ -136,18 +137,4 @@ class MemoryTools:
         return "\n".join(lines)
 
     def _extract_subject_id(self, event) -> str:
-        from astrbot.api.event import AstrMessageEvent
-        uid = event.unified_msg_origin
-        parts = uid.split(":")
-        user_id = parts[-1] if parts else "unknown"
-        msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
-
-        if self.config.memory_mode == "shared":
-            return f"{user_id}#shared"
-
-        if msg_type == "GroupMessage":
-            group_id = parts[-1] if parts else "unknown"
-            sender_id = event.get_sender_id() or user_id
-            return f"{sender_id}#{group_id}"
-        else:
-            return f"{user_id}#private"
+        return extract_subject_id(event, self.config.memory_mode)

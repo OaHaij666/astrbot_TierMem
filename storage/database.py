@@ -1,6 +1,7 @@
 import aiosqlite
 from pathlib import Path
 from typing import Optional
+from contextlib import asynccontextmanager
 
 
 class SQLiteDB:
@@ -13,6 +14,7 @@ class SQLiteDB:
         self._conn = await aiosqlite.connect(str(self.db_path))
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA foreign_keys = ON")
+        await self._conn.execute("PRAGMA journal_mode = WAL")
         return self
 
     async def init_tables(self) -> None:
@@ -59,6 +61,18 @@ class SQLiteDB:
         )
         await self._conn.commit()
 
+    @asynccontextmanager
+    async def transaction(self):
+        if not self._conn:
+            raise RuntimeError("Database not connected.")
+        try:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            yield
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+
     async def close(self) -> None:
         if self._conn:
             await self._conn.close()
@@ -71,6 +85,5 @@ class SQLiteDB:
         return self._conn
 
     async def vacuum_backup(self, backup_path: Path) -> None:
-        """使用 VACUUM INTO 创建全库备份"""
         backup_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._conn.execute(f"VACUUM INTO '{backup_path}'")
+        await self._conn.execute("VACUUM INTO ?", (str(backup_path),))

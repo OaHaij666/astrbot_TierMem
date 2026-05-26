@@ -1,17 +1,24 @@
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict
 from core.models import MemoryState, MemoryEntry, ConversationTurn
 from core.config import PluginConfig
+
+_UID_PATTERN = re.compile(r"\{\{uid:(\S+?)\}\}")
 
 
 class Injector:
     def __init__(self, config: PluginConfig):
         self.config = config
+        self.nickname_cache: Dict[str, str] = {}
+
+    def update_nickname_cache(self, cache: Dict[str, str]) -> None:
+        self.nickname_cache = cache
 
     def build_memory_prompt(
         self,
         state: MemoryState,
         subject_id: str,
-        scene: str,  # "private" or "group"
+        scene: str,
         fifo_turns: Optional[List[ConversationTurn]] = None,
     ) -> str:
         parts = []
@@ -21,7 +28,6 @@ class Injector:
         parts.append(f"- Scene: {scene}")
         parts.append("")
 
-        # 注入记忆层
         if scene == "private" and self.config.inject_memory_in_private:
             parts.append(self._format_layer("important", state.important))
             parts.append(self._format_layer("general", state.general))
@@ -34,17 +40,23 @@ class Injector:
             if layers == "all":
                 parts.append(self._format_layer("fleeting", state.fleeting))
 
-            # 群聊注入 FIFO
             if self.config.inject_fifo_in_group and fifo_turns:
                 parts.append("### [RECENT CONVERSATION WITH YOU] ###")
                 for turn in fifo_turns:
-                    parts.append(turn.to_prompt_text())
+                    parts.append(self._resolve_uid(turn.to_prompt_text()))
                 parts.append("")
 
         parts.append("### [MEMORY RULES] ###")
         parts.append("1. 只能将标记为当前 subject_id 的记忆应用到当前用户")
         parts.append("2. important 层是核心画像，general 是普通事实，fleeting 是临时内容")
         parts.append("3. 不要张冠李戴，未标记的记忆不要强行关联")
+        uid_list = [uid for uid in self.nickname_cache if uid]
+        if uid_list:
+            uid_example = ", ".join(
+                f"{{{{uid:{uid}}}}}={{{self.nickname_cache.get(uid, uid)}}}"
+                for uid in uid_list[:5]
+            )
+            parts.append(f"4. 记忆中的 {{{{uid:xxx}}}} 已自动替换为当前昵称 ({uid_example}...)")
         parts.append("====================\n")
 
         return "\n".join(parts)
@@ -54,6 +66,20 @@ class Injector:
             return f"<{name}>\n(No entries)\n</{name}>\n"
         lines = [f"<{name}>"]
         for e in entries:
-            lines.append(f"  - [{e.memory_id}] {e.content} (importance: {e.importance})")
+            resolved_content = self._resolve_uid(e.content)
+            lines.append(f"  - [{e.memory_id}] {resolved_content} (importance: {e.importance})")
         lines.append(f"</{name}>\n")
         return "\n".join(lines)
+
+    def _resolve_uid(self, text: str) -> str:
+        if "{{uid:" not in text:
+            return text
+
+        def replacer(match):
+            uid = match.group(1)
+            name = self.nickname_cache.get(uid)
+            if name:
+                return name
+            return uid
+
+        return _UID_PATTERN.sub(replacer, text)

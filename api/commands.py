@@ -4,6 +4,7 @@ from core.config import PluginConfig
 from storage.memory_repo import MemoryRepository
 from storage.fifo_repo import FifoRepository
 from service.backup import BackupService
+from utils.subject import extract_subject_id
 
 
 class CommandHandler:
@@ -44,7 +45,7 @@ class CommandHandler:
         return event.plain_result("请使用 /memory sum 命令触发总结（由主插件处理）。")
 
     async def _cmd_check(self, event: AstrMessageEvent, args: list) -> MessageEventResult:
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         layer = args[0] if args else None
 
         if layer and layer not in ("important", "general", "fleeting"):
@@ -61,7 +62,7 @@ class CommandHandler:
 
     async def _cmd_clear(self, event: AstrMessageEvent, args: list) -> MessageEventResult:
         """清除自己的记忆和 FIFO"""
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         await self.mem_repo.delete_by_subject(subject_id)
         await self.fifo_repo.clear(subject_id)
         logger.info(f"用户清除了记忆: {subject_id}")
@@ -76,7 +77,7 @@ class CommandHandler:
             return event.plain_result(f"回滚失败: {e}")
 
     async def _cmd_status(self, event: AstrMessageEvent) -> MessageEventResult:
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         fifo_count = await self.fifo_repo.count(subject_id)
         mem_counts = {
             "important": await self.mem_repo.count_by_subject_layer(subject_id, "important"),
@@ -95,7 +96,7 @@ class CommandHandler:
 
     async def _cmd_fifo(self, event: AstrMessageEvent) -> MessageEventResult:
         """查看当前用户的 FIFO 对话缓存内容"""
-        subject_id = self._extract_subject_id(event)
+        subject_id = extract_subject_id(event, self.config.memory_mode)
         turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
         if not turns:
             return event.plain_result(f"FIFO 为空 (subject: {subject_id})")
@@ -110,8 +111,10 @@ class CommandHandler:
     async def _cmd_help(self, event: AstrMessageEvent) -> MessageEventResult:
         text = (
             "/memory sum - 立即触发总结\n"
-            "/memory check [layer] - 查看记忆 (layer: important/general/fleeting)\n"
+            "/memory check [layer] - 查看自己的记忆 (layer: important/general/fleeting)\n"
+            "/memory check @user_id [layer] - 管理员查看指定用户的记忆\n"
             "/memory fifo - 查看当前用户的 FIFO 对话缓存内容\n"
+            "/memory condense - 手动触发记忆浓缩（对 important/general 层）\n"
             "/memory clear - 清除你的所有记忆和对话缓存\n"
             "/memory rollback - 回滚到上次备份\n"
             "/memory status - 查看当前状态\n"
@@ -121,17 +124,4 @@ class CommandHandler:
         return event.plain_result(text)
 
     def _extract_subject_id(self, event: AstrMessageEvent) -> str:
-        uid = event.unified_msg_origin
-        parts = uid.split(":")
-        user_id = parts[-1] if parts else "unknown"
-        msg_type = parts[-2] if len(parts) >= 2 else "PrivateMessage"
-
-        if self.config.memory_mode == "shared":
-            return f"{user_id}#shared"
-
-        if msg_type == "GroupMessage":
-            group_id = parts[-1] if parts else "unknown"
-            sender_id = event.get_sender_id() or user_id
-            return f"{sender_id}#{group_id}"
-        else:
-            return f"{user_id}#private"
+        return extract_subject_id(event, self.config.memory_mode)
