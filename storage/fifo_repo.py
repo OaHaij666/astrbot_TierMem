@@ -58,6 +58,29 @@ class FifoRepository:
         )
         await self.db.commit()
 
+    async def get_active_subjects(self, group_id: str, count: int, exclude_user_id: str = "") -> List[str]:
+        if exclude_user_id:
+            async with self.db.execute(
+                """
+                SELECT DISTINCT subject_id FROM fifo_buffer
+                WHERE group_id = ? AND subject_id NOT LIKE ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (group_id, f"{exclude_user_id}#%", count),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with self.db.execute(
+                """
+                SELECT DISTINCT subject_id FROM fifo_buffer
+                WHERE group_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (group_id, count),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [row["subject_id"] for row in rows]
+
     def _row_to_turn(self, row: aiosqlite.Row) -> ConversationTurn:
         return ConversationTurn(
             turn_id=row["turn_id"],

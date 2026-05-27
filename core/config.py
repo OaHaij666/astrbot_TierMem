@@ -22,6 +22,8 @@ class PluginConfig:
     # 注入控制
     inject_memory_in_private: bool = True
     inject_layers_in_group: Literal["important_only", "important_general", "all"] = "important_only"
+    active_user_inject_count: int = 4
+    active_user_inject_layers: Literal["important_only", "important_general", "all"] = "important_general"
 
     # 溢出处理
     memory_overflow_policy: Literal["evict", "condense"] = "evict"
@@ -47,6 +49,8 @@ class PluginConfig:
             summary_full_replace_prompt=config.get("summary_full_replace_prompt", ""),
             inject_memory_in_private=config.get("inject_memory_in_private", True),
             inject_layers_in_group=config.get("inject_layers_in_group", "important_only"),
+            active_user_inject_count=config.get("active_user_inject_count", 4),
+            active_user_inject_layers=config.get("active_user_inject_layers", "important_general"),
             memory_overflow_policy=config.get("memory_overflow_policy", "evict"),
             enable_auto_summary=config.get("enable_auto_summary", True),
             enable_manual_summary=config.get("enable_manual_summary", True),

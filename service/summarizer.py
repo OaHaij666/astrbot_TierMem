@@ -55,7 +55,7 @@ class Summarizer:
         action = parsed.get("action", "")
         if action == "read_users" and parsed.get("user_ids"):
             user_ids = parsed["user_ids"]
-            logger.info(f"总结器 T1 请求读取跨用户记忆: {user_ids}")
+            logger.debug(f"总结器 T1 请求读取跨用户记忆: {user_ids}")
 
             cross_memories_text = await self._fetch_cross_user_memories(
                 user_ids, subject_id, memory_mode, mem_repo
@@ -323,13 +323,13 @@ class Summarizer:
             total_chars_after = sum(len(e.content) for e in result)
             ratio = (total_chars_before - total_chars_after) / total_chars_before if total_chars_before else 0
             if ratio >= target_ratio:
-                logger.info(
+                logger.debug(
                     f"浓缩完成(R1): {layer} {len(entries)} -> {len(result)} 条, "
                     f"减少 {ratio:.1%}"
                 )
                 return result
 
-        logger.info(f"浓缩 R1 未达标，启动 R2 重试")
+        logger.debug(f"浓缩 R1 未达标，启动 R2 重试")
 
         retry_prompt = self._build_condense_retry_prompt(
             entries, target_count, layer, total_chars_before, target_chars, raw
@@ -341,13 +341,13 @@ class Summarizer:
             total_chars_after = sum(len(e.content) for e in result)
             ratio = (total_chars_before - total_chars_after) / total_chars_before if total_chars_before else 0
             if ratio >= target_ratio:
-                logger.info(
+                logger.debug(
                     f"浓缩完成(R2): {layer} {len(entries)} -> {len(result)} 条, "
                     f"减少 {ratio:.1%}"
                 )
                 return result
 
-        logger.info(f"浓缩 R2 未达标，启动 R3 最终重试")
+        logger.debug(f"浓缩 R2 未达标，启动 R3 最终重试")
 
         retry_prompt3 = self._build_condense_retry_prompt(
             entries, target_count, layer, total_chars_before, target_chars, raw2
@@ -358,7 +358,7 @@ class Summarizer:
         if result is not None:
             total_chars_after = sum(len(e.content) for e in result)
             ratio = (total_chars_before - total_chars_after) / total_chars_before if total_chars_before else 0
-            logger.info(
+            logger.debug(
                 f"浓缩完成(R3): {layer} {len(entries)} -> {len(result)} 条, "
                 f"减少 {ratio:.1%}"
             )

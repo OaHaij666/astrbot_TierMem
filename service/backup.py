@@ -17,7 +17,7 @@ class BackupService:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = self.backup_dir / f"memory.db.bak.{timestamp}"
         await self.db.vacuum_backup(backup_path)
-        logger.info(f"备份已创建: {backup_path}")
+        logger.debug(f"备份已创建: {backup_path}")
         return backup_path
 
     def list_backups(self) -> List[Path]:
@@ -54,4 +54,4 @@ class BackupService:
         backups = self.list_backups()
         for old in backups[keep:]:
             old.unlink()
-            logger.info(f"清理旧备份: {old}")
+            logger.debug(f"清理旧备份: {old}")

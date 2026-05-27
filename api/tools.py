@@ -45,7 +45,7 @@ class MemoryTools:
             source="tool_call",
         )
         await self.mem_repo.upsert(entry)
-        logger.info(f"[tool] memory_add: {entry.memory_id}")
+        logger.debug(f"[tool] memory_add: {entry.memory_id}")
         return f"已添加记忆 [{entry.memory_id}]: {content[:50]}..."
 
     async def memory_update(
@@ -76,7 +76,7 @@ class MemoryTools:
         target.content = content
         target.source = "tool_call"
         await self.mem_repo.upsert(target)
-        logger.info(f"[tool] memory_update: {memory_id}")
+        logger.debug(f"[tool] memory_update: {memory_id}")
         return f"已更新记忆 [{memory_id}]"
 
     async def memory_delete(
@@ -94,7 +94,7 @@ class MemoryTools:
 
         ok = await self.mem_repo.delete(memory_id)
         if ok:
-            logger.info(f"[tool] memory_delete: {memory_id}")
+            logger.debug(f"[tool] memory_delete: {memory_id}")
             return f"已删除记忆 [{memory_id}]"
         return f"未找到记忆 {memory_id}"
 

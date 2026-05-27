@@ -83,3 +83,17 @@ class Injector:
             return uid
 
         return _UID_PATTERN.sub(replacer, text)
+
+    def build_active_users_section(self, users_data: list) -> str:
+        if not users_data:
+            return ""
+        parts = ["### [ACTIVE USERS' IMPRESSIONS] ###"]
+        for item in users_data:
+            user_label = self._resolve_uid(item.get("user_label", item.get("user_id", "?")))
+            parts.append(f"--- {user_label} ---")
+            for layer_name, entries in item.get("layers", {}).items():
+                if entries:
+                    for e in entries:
+                        parts.append(f"  [{layer_name}] {self._resolve_uid(e.content)}")
+        parts.append("")
+        return "\n".join(parts)

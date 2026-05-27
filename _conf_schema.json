@@ -71,6 +71,20 @@
         "options": ["important_only", "important_general", "all"],
         "hint": "important_only=仅重要记忆；important_general=重要+一般；all=全部"
     },
+    "active_user_inject_count": {
+        "description": "群聊时额外注入多少名活跃用户的印象（0=不注入）",
+        "type": "int",
+        "default": 4,
+        "min": 0,
+        "max": 20
+    },
+    "active_user_inject_layers": {
+        "description": "活跃用户印象注入层级",
+        "type": "string",
+        "default": "important_general",
+        "options": ["important_only", "important_general", "all"],
+        "hint": "important_only=仅重要记忆；important_general=重要+一般；all=全部含短期"
+    },
     "enable_auto_summary": {
         "description": "是否启用队列满自动总结",
         "type": "bool",

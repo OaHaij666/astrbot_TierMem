@@ -93,6 +93,8 @@ git clone https://github.com/OaHaij666/astrbot_TierMem.git
 | `inject_fifo_in_group` | 群聊时是否注入 FIFO 对话 | `true` |
 | `inject_memory_in_private` | 私聊时是否注入三层记忆 | `true` |
 | `inject_layers_in_group` | 群聊时注入的记忆层 | `important_only` |
+| `active_user_inject_count` | 群聊额外注入活跃用户印象数（0=不注入） | `4` |
+| `active_user_inject_layers` | 活跃用户印象注入层级 | `important_general` |
 | `enable_auto_summary` | 是否启用 FIFO 满自动总结 | `true` |
 | `enable_manual_summary` | 是否允许手动触发总结 | `true` |
 | `enable_llm_tools` | 是否向 LLM 暴露记忆工具 | `true` |

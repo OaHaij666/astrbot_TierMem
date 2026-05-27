@@ -148,6 +148,12 @@ class SmartMemoryPlugin(Star):
         # 构建注入文本
         mem_prompt = self.injector.build_memory_prompt(state, subject_id, scene, fifo_turns)
 
+        # 群聊时注入活跃用户印象
+        if scene == "group" and self.config.active_user_inject_count > 0:
+            active_section = await self._build_active_users_section(subject_id)
+            if active_section:
+                mem_prompt += "\n" + active_section
+
         # 追加到系统提示词
         req.system_prompt = (req.system_prompt or "") + mem_prompt
 
@@ -216,6 +222,43 @@ class SmartMemoryPlugin(Star):
         await asyncio.sleep(delay)
         self._pending_user_messages.pop(origin, None)
 
+    async def _build_active_users_section(self, current_subject_id: str) -> str:
+        parts = current_subject_id.split("#")
+        current_user = parts[0]
+        group_id = parts[1] if len(parts) > 1 and parts[1] not in ("shared", "private") else None
+        if not group_id:
+            return ""
+
+        active_subjects = await self.fifo_repo.get_active_subjects(
+            group_id, self.config.active_user_inject_count, exclude_user_id=current_user
+        )
+        if not active_subjects:
+            return ""
+
+        layers_config = self.config.active_user_inject_layers
+        users_data = []
+        for subj in active_subjects:
+            uid = subj.split("#")[0]
+            state = await self.mem_repo.get_state(subj)
+            layer_map = {}
+            if layers_config in ("important_only", "important_general", "all"):
+                layer_map["important"] = state.important
+            if layers_config in ("important_general", "all"):
+                layer_map["general"] = state.general
+            if layers_config == "all":
+                layer_map["fleeting"] = state.fleeting
+            has_any = any(entries for entries in layer_map.values())
+            if has_any:
+                users_data.append({
+                    "user_id": uid,
+                    "user_label": f"{{{{uid:{uid}}}}}",
+                    "layers": layer_map,
+                })
+
+        if not users_data:
+            return ""
+        return self.injector.build_active_users_section(users_data)
+
     async def _run_summary(self, subject_id: str):
         """后台执行总结，带并发控制和互斥锁"""
         if self._summary_semaphore is None:
@@ -256,7 +299,7 @@ class SmartMemoryPlugin(Star):
                     # 更新总结轮次计数，淘汰过期 fleeting
                     await self._evict_fleeting_by_ttl(subject_id)
 
-                    logger.info(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
+                    logger.debug(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
 
                     self._summary_failure_count.pop(subject_id, None)
 
@@ -277,7 +320,7 @@ class SmartMemoryPlugin(Star):
                     logger.warning(f"总结连续失败 {fails} 次，已清空 FIFO: {subject_id}")
                 else:
                     await self.fifo_repo.delete_oldest(subject_id, self.config.fifo_size)
-                    logger.info(f"总结失败，FIFO trim 到最新 {self.config.fifo_size} 轮: {subject_id}")
+                    logger.debug(f"总结失败，FIFO trim 到最新 {self.config.fifo_size} 轮: {subject_id}")
 
     async def _evict_fleeting_by_ttl(self, subject_id: str):
         key = f"fleeting_round_{subject_id}"
@@ -290,7 +333,7 @@ class SmartMemoryPlugin(Star):
             entries = await self.mem_repo.get_by_subject(subject_id, "fleeting")
             for e in entries:
                 await self.mem_repo.delete(e.memory_id)
-            logger.info(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {current} 轮）")
+            logger.debug(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {current} 轮）")
             await self._save_meta(key, "0")
 
     async def _load_meta_int(self, key: str, default: int) -> int:
@@ -374,18 +417,18 @@ class SmartMemoryPlugin(Star):
                             source="auto_summary",
                         )
                         await self.mem_repo.upsert(entry)
-                        logger.info(f"跨用户 add: {target_subject} memory={entry.memory_id}")
+                        logger.debug(f"跨用户 add: {target_subject} memory={entry.memory_id}")
                     elif op.action == "update" and op.memory_id:
                         if op.memory_id in index:
                             entry = index[op.memory_id]
                             entry.content = op.content or entry.content
                             entry.updated_at = datetime.now(timezone.utc).isoformat()
                             await self.mem_repo.upsert(entry)
-                            logger.info(f"跨用户 update: {target_subject} memory={op.memory_id}")
+                            logger.debug(f"跨用户 update: {target_subject} memory={op.memory_id}")
                     elif op.action == "delete" and op.memory_id:
                         if op.memory_id in index:
                             await self.mem_repo.delete(op.memory_id)
-                            logger.info(f"跨用户 delete: {target_subject} memory={op.memory_id}")
+                            logger.debug(f"跨用户 delete: {target_subject} memory={op.memory_id}")
 
                 await self._evict_if_overflow(target_subject)
 
@@ -403,7 +446,7 @@ class SmartMemoryPlugin(Star):
                         entries, self.config.max_memory_per_layer, layer
                     )
                     await self.mem_repo.replace_layer(subject_id, layer, condensed)
-                    logger.info(f"浓缩完成: {subject_id} {layer} 层 {len(entries)} -> {len(condensed)} 条")
+                    logger.debug(f"浓缩完成: {subject_id} {layer} 层 {len(entries)} -> {len(condensed)} 条")
                 except Exception as e:
                     logger.warning(f"浓缩失败，回退到淘汰: {e}")
                     await self._hard_evict(entries, count, subject_id, layer)
@@ -419,7 +462,7 @@ class SmartMemoryPlugin(Star):
         if tasks:
             await asyncio.gather(*tasks)
         for e in to_delete:
-            logger.info(f"淘汰记忆: {e.memory_id}")
+            logger.debug(f"淘汰记忆: {e.memory_id}")
 
     # ------------------------------------------------------------------
     # 命令
