@@ -55,12 +55,12 @@ class PluginConfig:
     enable_llm_tools: bool = True
     tool_caution_in_prompt: bool = True
 
-    # 各层默认半衰期（天）。core 为 0，表示不随时间自动衰减。
-    core_half_life_days: float = 0.0
-    semantic_half_life_days: float = 180.0
-    episodic_half_life_days: float = 45.0
-    working_half_life_days: float = 7.0
-    relation_half_life_days: float = 180.0
+    # 各层默认半衰期（天），按互联网聊天场景控制在 30 天以内。
+    core_half_life_days: float = 30.0
+    semantic_half_life_days: float = 21.0
+    episodic_half_life_days: float = 7.0
+    working_half_life_days: float = 2.0
+    relation_half_life_days: float = 30.0
     retrieval_min_strength: float = 0.08
 
     @classmethod

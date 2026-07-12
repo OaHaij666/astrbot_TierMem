@@ -283,18 +283,18 @@
             </fieldset>
             <fieldset class="panel">
               <legend>被动群聊观察</legend>
-              <div class="field-grid">
-                <label
+              <div class="field-grid group-scope-grid">
+                <label class="compact-field"
                   >名单模式<select name="passive_group_filter_mode">
                     <option value="whitelist">白名单</option>
                     <option value="blacklist">黑名单</option>
                   </select></label
                 >
-                <label
+                <label class="group-id-field"
                   >群 ID 名单<textarea
                     name="passive_group_ids"
                     data-kind="list"
-                    rows="5"
+                    rows="3"
                     placeholder="每行一个群 ID"
                   ></textarea></label
                 >

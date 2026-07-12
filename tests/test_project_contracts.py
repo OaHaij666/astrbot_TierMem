@@ -37,6 +37,28 @@ class ProjectContractTests(unittest.TestCase):
         self.assertEqual(schema["passive_group_filter_mode"]["default"], "whitelist")
         self.assertEqual(schema["passive_group_ids"]["default"], [])
 
+    def test_default_decay_profile_is_capped_at_thirty_days(self):
+        from core.config import PluginConfig
+
+        config = PluginConfig()
+        expected = {
+            "core_half_life_days": 30.0,
+            "semantic_half_life_days": 21.0,
+            "episodic_half_life_days": 7.0,
+            "working_half_life_days": 2.0,
+            "relation_half_life_days": 30.0,
+        }
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        demo_script = (ROOT / "pages/tiermem-console/app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for key, value in expected.items():
+            self.assertEqual(getattr(config, key), value)
+            self.assertEqual(schema[key]["default"], value)
+            self.assertIn(f"{key}: {value:g}", demo_script)
+            self.assertLessEqual(value, 30.0)
+
     def test_example_env_contains_no_real_secret(self):
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DEEPSEEK_MODEL=deepseek-v4-flash", example)

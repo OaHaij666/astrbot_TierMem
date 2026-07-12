@@ -547,6 +547,19 @@ td code {
   grid-template-columns: repeat(3, minmax(180px, 1fr));
   gap: 16px;
 }
+.group-scope-grid {
+  align-items: start;
+}
+.group-scope-grid .compact-field,
+.group-scope-grid .group-id-field {
+  align-self: start;
+}
+.group-scope-grid .compact-field select {
+  height: 44px;
+}
+.group-scope-grid .group-id-field textarea {
+  min-height: 88px;
+}
 .helper {
   font-size: 12px;
   color: var(--muted);
