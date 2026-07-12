@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 
 
@@ -58,6 +59,17 @@ class PluginConfig:
         for name in cls.__dataclass_fields__:
             if name in config:
                 values[name] = config[name]
+        keywords = values.get("relation_intent_keywords")
+        if isinstance(keywords, str):
+            try:
+                parsed = json.loads(keywords)
+                values["relation_intent_keywords"] = (
+                    parsed
+                    if isinstance(parsed, dict)
+                    else default_relation_intent_keywords()
+                )
+            except (TypeError, ValueError):
+                values["relation_intent_keywords"] = default_relation_intent_keywords()
         return cls(**values)
 
     def half_life_for_layer(self, layer: str) -> float:

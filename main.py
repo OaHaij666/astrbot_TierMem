@@ -1,5 +1,6 @@
 # ruff: noqa: E402
 import asyncio
+import json
 import sys
 from collections import OrderedDict, defaultdict, deque
 from dataclasses import asdict
@@ -758,7 +759,12 @@ class TierMemPlugin(Star):
             return error_response(str(exc), status_code=400)
         for key in editable:
             setattr(self.config, key, getattr(updated, key))
-            self._raw_config[key] = getattr(updated, key)
+            value = getattr(updated, key)
+            self._raw_config[key] = (
+                json.dumps(value, ensure_ascii=False)
+                if key == "relation_intent_keywords"
+                else value
+            )
         save = getattr(self._raw_config, "save_config", None)
         if callable(save):
             save()

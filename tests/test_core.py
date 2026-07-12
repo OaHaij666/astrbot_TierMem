@@ -20,6 +20,12 @@ from storage.memory_repo import MemoryRepository
 
 
 class DecayTests(unittest.TestCase):
+    def test_json_text_relation_keywords_are_parsed(self):
+        config = PluginConfig.from_astrbot_config(
+            {"relation_intent_keywords": '{"friend_of":["朋友"]}'}
+        )
+        self.assertEqual(config.relation_intent_keywords, {"friend_of": ["朋友"]})
+
     def test_half_life_reduces_strength(self):
         memory = MemoryEntry(
             "m1",
