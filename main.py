@@ -26,6 +26,7 @@ from core.exceptions import SummaryError
 from core.models import (
     ConversationTurn,
     Entity,
+    GroupObservation,
     MemoryEntry,
     Relation,
     RelationEvidence,
@@ -34,11 +35,18 @@ from core.models import (
 )
 from service.backup import BackupService
 from service.graph_retriever import GraphRetriever
+from service.group_summarizer import GroupSummarizer
 from service.injector import Injector
+from service.passive_group_capture import (
+    PassiveGroupCaptureFilter,
+    session_allows_capture,
+    set_active_plugin,
+)
 from service.summarizer import Summarizer
 from storage.database import SQLiteDB
 from storage.fifo_repo import FifoRepository
 from storage.graph_repo import GraphRepository
+from storage.group_observation_repo import GroupObservationRepository
 from storage.memory_repo import MemoryRepository
 from utils.id_gen import (
     generate_evidence_id,
@@ -69,7 +77,9 @@ class TierMemPlugin(Star):
         self.mem_repo = None
         self.graph_repo = None
         self.fifo_repo = None
+        self.group_observation_repo = None
         self.summarizer = None
+        self.group_summarizer = None
         self.injector = None
         self.backup_service = None
         self.commands = None
@@ -83,6 +93,12 @@ class TierMemPlugin(Star):
         self._nickname_cache = OrderedDict()
         self._scheduled_summaries = set()
         self._fifo_watchdog_task = None
+        self._group_watchdog_task = None
+        self._passive_capture_tasks = set()
+        self._group_summary_tasks = {}
+        self._group_locks = {}
+        self._group_summary_failures = {}
+        set_active_plugin(self)
         self._register_web_apis()
 
     async def initialize(self):
@@ -96,15 +112,25 @@ class TierMemPlugin(Star):
             max(1, int(self.config.max_concurrent_summaries))
         )
         self._initialized = True
+        self._warn_passive_group_policy()
         if self.config.enable_auto_summary and self.config.fifo_max_wait_minutes > 0:
             self._fifo_watchdog_task = asyncio.create_task(self._fifo_watchdog())
+        if (
+            self.config.enable_passive_group_capture
+            and self.config.passive_group_max_wait_minutes > 0
+        ):
+            self._group_watchdog_task = asyncio.create_task(
+                self._passive_group_watchdog()
+            )
         logger.info("TierMem v2 初始化完成：原子记忆 + 知识图谱 + 惰性衰减")
 
     def _wire_services(self):
         self.mem_repo = MemoryRepository(self.db)
         self.graph_repo = GraphRepository(self.db)
         self.fifo_repo = FifoRepository(self.db)
+        self.group_observation_repo = GroupObservationRepository(self.db)
         self.summarizer = Summarizer(self.config, self.context)
+        self.group_summarizer = GroupSummarizer(self.config, self.context)
         self.injector = Injector(self.config)
         self.backup_service = BackupService(self.db, self.data_dir / "backup")
         self.commands = CommandHandler(
@@ -114,6 +140,17 @@ class TierMemPlugin(Star):
         self.graph_retriever = GraphRetriever(
             self.config, self.graph_repo, self.mem_repo
         )
+
+    def _warn_passive_group_policy(self):
+        ids = [str(item).strip() for item in self.config.passive_group_ids]
+        if (
+            self.config.enable_passive_group_capture
+            and self.config.passive_group_filter_mode == "blacklist"
+            and not any(ids)
+        ):
+            logger.warning(
+                "TierMem 被动群聊观察已启用且黑名单为空：将捕获所有群的普通消息"
+            )
 
     def _register_web_apis(self):
         if not hasattr(self.context, "register_web_api"):
@@ -129,6 +166,11 @@ class TierMemPlugin(Star):
             self.context.register_web_api(
                 f"/astrbot_TierMem/{suffix}", handler, methods, desc
             )
+
+    @filter.custom_filter(PassiveGroupCaptureFilter, False)
+    async def passive_group_capture_hook(self, event: AstrMessageEvent):
+        """The filter schedules capture and returns False, so this body is not run."""
+        return
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -152,13 +194,30 @@ class TierMemPlugin(Star):
             relations = recall.relations
             entities = await self._load_relation_entities(relations)
             fifo = None
+            group_observations = None
             if scene == "group" and self.config.inject_fifo_in_group:
                 fifo = await self.fifo_repo.get_turns(
                     user_id, self.config.fifo_size, context_id
                 )
+            group_id = extract_group_id(event)
+            if (
+                scene == "group"
+                and group_id
+                and self.config.allows_passive_group(group_id)
+                and self.config.passive_group_recent_inject_limit > 0
+            ):
+                group_observations = await self.group_observation_repo.get_recent(
+                    context_id, self.config.passive_group_recent_inject_limit
+                )
             self.injector.update_nickname_cache(self._nickname_cache)
             req.system_prompt = (req.system_prompt or "") + self.injector.build_prompt(
-                user_id, scene, memories, relations, entities, fifo
+                user_id,
+                scene,
+                memories,
+                relations,
+                entities,
+                fifo,
+                group_observations,
             )
 
         if self.config.enable_llm_tools and self.config.tool_caution_in_prompt:
@@ -213,6 +272,254 @@ class TierMemPlugin(Star):
                 self._schedule_summary(pending["user_id"], pending["context_id"])
         except Exception as exc:
             logger.error(f"保存对话失败: {exc}")
+
+    def _schedule_passive_group_capture(self, event: AstrMessageEvent) -> None:
+        if not self._initialized or not self.config.enable_passive_group_capture:
+            return
+        task = asyncio.create_task(self._capture_passive_group_message(event))
+        self._passive_capture_tasks.add(task)
+        task.add_done_callback(self._passive_capture_tasks.discard)
+
+    async def _capture_passive_group_message(self, event: AstrMessageEvent):
+        try:
+            context_id = extract_context_id(event)
+            group_id = extract_group_id(event)
+            if not group_id or not self.config.allows_passive_group(group_id):
+                return
+            if not await session_allows_capture(event.unified_msg_origin):
+                return
+            sender_user_id = extract_user_id(event)
+            try:
+                self_id = str(event.get_self_id() or "")
+            except Exception:
+                self_id = ""
+            if self_id and sender_user_id == self_id:
+                return
+            content = str(getattr(event, "message_str", "") or "").strip()
+            if len(
+                content
+            ) < self.config.passive_group_min_message_length or content.startswith("/"):
+                return
+            sender_name = self._event_sender_name(event, sender_user_id)
+            message_obj = getattr(event, "message_obj", None)
+            raw_message_id = getattr(message_obj, "message_id", None)
+            observation_id = (
+                f"{context_id}:{raw_message_id}"
+                if raw_message_id
+                else generate_turn_id()
+            )
+            inserted = await self.group_observation_repo.append(
+                GroupObservation(
+                    observation_id=observation_id,
+                    context_id=context_id,
+                    group_id=group_id,
+                    sender_user_id=sender_user_id,
+                    sender_name=sender_name,
+                    content=content[:4000],
+                )
+            )
+            if not inserted:
+                return
+            await self.group_observation_repo.trim(
+                context_id, self.config.passive_group_max_buffer
+            )
+            if (
+                await self.group_observation_repo.count(context_id)
+                >= self.config.passive_group_fifo_size
+            ):
+                self._schedule_group_summary(context_id, group_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"被动群消息捕获失败: {exc}")
+
+    @staticmethod
+    def _event_sender_name(event, fallback: str):
+        try:
+            name = event.get_sender_name()
+            if name:
+                return str(name)
+        except Exception:
+            pass
+        return str(
+            next(
+                (
+                    getattr(event, key, None)
+                    for key in ("sender_name", "group_nickname", "nickname")
+                    if getattr(event, key, None)
+                ),
+                fallback,
+            )
+        )
+
+    def _schedule_group_summary(self, context_id: str, group_id: str) -> bool:
+        existing = self._group_summary_tasks.get(context_id)
+        if existing and not existing.done():
+            return False
+        failure = self._group_summary_failures.get(context_id)
+        if failure and datetime.now(timezone.utc) < failure["retry_after"]:
+            return False
+
+        async def runner():
+            try:
+                await self._run_group_summary(context_id, group_id)
+            finally:
+                self._group_summary_tasks.pop(context_id, None)
+
+        self._group_summary_tasks[context_id] = asyncio.create_task(runner())
+        return True
+
+    async def _run_group_summary(self, context_id: str, group_id: str):
+        if not self._initialized or not self.config.enable_passive_group_capture:
+            return
+        async with self._summary_semaphore:
+            async with self._group_lock(context_id):
+                observations = await self.group_observation_repo.get(
+                    context_id, self.config.passive_group_max_buffer
+                )
+                if not observations:
+                    return
+                try:
+                    await self.backup_service.create_backup()
+                    self.backup_service.cleanup_old_backups(keep=5)
+                    memories = await self.mem_repo.get_by_user(context_id)
+                    relations = await self.graph_repo.get_neighbors(
+                        context_id, 200, 0.0, context_id
+                    )
+                    result = await self.group_summarizer.summarize_group(
+                        observations, memories, relations, context_id
+                    )
+                    await self._apply_group_summary(
+                        context_id, group_id, observations, result
+                    )
+                    await self.mem_repo.prune(
+                        context_id, self.config.max_memories_per_user
+                    )
+                    self._group_summary_failures.pop(context_id, None)
+                    logger.info(f"群 {group_id} 观察总结完成: {result.summary[:80]}")
+                except SummaryError as exc:
+                    logger.error(f"群 {group_id} 观察总结校验失败: {exc}")
+                    self._defer_group_summary_retry(context_id)
+                except Exception as exc:
+                    logger.exception(f"群 {group_id} 观察总结异常: {exc}")
+                    self._defer_group_summary_retry(context_id)
+
+    def _defer_group_summary_retry(self, context_id: str):
+        previous = self._group_summary_failures.get(context_id, {"attempts": 0})
+        attempts = previous["attempts"] + 1
+        delay_minutes = min(60, 5 * (2 ** min(attempts - 1, 4)))
+        self._group_summary_failures[context_id] = {
+            "attempts": attempts,
+            "retry_after": datetime.now(timezone.utc)
+            + timedelta(minutes=delay_minutes),
+        }
+
+    async def _apply_group_summary(self, context_id, group_id, observations, result):
+        participant_names = {
+            item.sender_user_id: item.sender_name for item in observations
+        }
+        async with self.db.transaction():
+            await self.graph_repo.upsert_entity_no_commit(
+                Entity(context_id, "group", group_id)
+            )
+            for user_id, name in participant_names.items():
+                await self.graph_repo.upsert_entity_no_commit(
+                    Entity(f"user:{user_id}", "user", name)
+                )
+
+            prepared_relations = []
+            for operation in result.relation_operations:
+                source = self._entity(
+                    operation.source_entity_id,
+                    operation.source_entity_type,
+                    operation.source_name,
+                    operation.source_aliases,
+                )
+                target = self._entity(
+                    operation.target_entity_id,
+                    operation.target_entity_type,
+                    operation.target_name,
+                    operation.target_aliases,
+                )
+                await self.graph_repo.upsert_entity_no_commit(source)
+                await self.graph_repo.upsert_entity_no_commit(target)
+                prepared_relations.append((operation, source, target))
+
+            for operation in result.memory_operations:
+                memory = await self.mem_repo.upsert_no_commit(
+                    MemoryEntry(
+                        memory_id=generate_memory_id(),
+                        owner_user_id=context_id,
+                        content=operation.content,
+                        layer=operation.layer,
+                        category=operation.category,
+                        importance=self._int_range(operation.importance, 1, 5, 3),
+                        confidence=self._float_range(operation.confidence, 0.7),
+                        strength=0.8,
+                        stability=self._float_range(operation.stability, 0.5),
+                        decay_rate=decay_rate_from_half_life(
+                            self.config.half_life_for_layer(operation.layer)
+                        ),
+                        source="passive_group_summary",
+                        source_turn_id=observations[-1].observation_id,
+                        visibility_scope="group",
+                        context_id=context_id,
+                    )
+                )
+                await self.graph_repo.link_memory_entities_no_commit(
+                    memory.memory_id,
+                    operation.entity_ids,
+                    mention_role="group_observation",
+                    confidence=memory.confidence,
+                )
+
+            for operation, source, target in prepared_relations:
+                relation = Relation(
+                    relation_id=generate_relation_id(),
+                    source_entity_id=source.entity_id,
+                    relation_type=operation.relation_type,
+                    target_entity_id=target.entity_id,
+                    confidence=self._float_range(operation.confidence, 0.7),
+                    strength=0.8,
+                    stability=self._float_range(operation.stability, 0.5),
+                    decay_rate=decay_rate_from_half_life(
+                        self.config.relation_half_life_days
+                    ),
+                    visibility_scope="group",
+                    context_id=context_id,
+                    owner_user_id=context_id,
+                )
+                evidence = await self._relation_evidence_atom_no_commit(
+                    operation.evidence,
+                    relation,
+                    context_id,
+                    observations[-1].observation_id,
+                    "support",
+                )
+                await self.graph_repo.upsert_relation_no_commit(relation, evidence)
+
+            await self.group_observation_repo.clear_ids_no_commit(
+                [item.observation_id for item in observations]
+            )
+
+    async def _passive_group_watchdog(self):
+        max_wait_seconds = self.config.passive_group_max_wait_minutes * 60.0
+        interval = min(60.0, max(10.0, max_wait_seconds / 4.0))
+        try:
+            while self._initialized and self.config.enable_passive_group_capture:
+                cutoff = (
+                    datetime.now(timezone.utc) - timedelta(seconds=max_wait_seconds)
+                ).isoformat()
+                streams = await self.group_observation_repo.get_expired_streams(cutoff)
+                for stream in streams:
+                    self._schedule_group_summary(
+                        stream["context_id"], stream["group_id"]
+                    )
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.exception(f"群观察超时扫描异常: {exc}")
 
     async def _run_summary(self, user_id: str, context_id: str):
         if not self._initialized:
@@ -499,6 +806,7 @@ class TierMemPlugin(Star):
             "entities": "SELECT COUNT(*) n FROM entities",
             "relations": "SELECT COUNT(*) n FROM relations WHERE status='active'",
             "fifo": "SELECT COUNT(*) n FROM fifo_buffer",
+            "group_observations": "SELECT COUNT(*) n FROM group_observation_buffer",
         }
         stats = {}
         for key, sql in queries.items():
@@ -699,6 +1007,15 @@ class TierMemPlugin(Star):
             "inject_memory_in_private",
             "inject_memory_in_group",
             "inject_fifo_in_group",
+            "enable_passive_group_capture",
+            "passive_group_filter_mode",
+            "passive_group_ids",
+            "passive_group_fifo_size",
+            "passive_group_max_wait_minutes",
+            "passive_group_max_buffer",
+            "passive_group_recent_inject_limit",
+            "passive_group_min_message_length",
+            "passive_group_summary_system_prompt",
             "max_concurrent_summaries",
             "summary_provider_id",
             "summary_system_prompt",
@@ -722,6 +1039,10 @@ class TierMemPlugin(Star):
             updated = PluginConfig.from_astrbot_config(candidate)
             if updated.graph_recall_max_hops not in (1, 2):
                 raise ValueError("graph_recall_max_hops must be 1 or 2")
+            if updated.passive_group_filter_mode not in ("whitelist", "blacklist"):
+                raise ValueError("passive_group_filter_mode is invalid")
+            if not isinstance(updated.passive_group_ids, list):
+                raise ValueError("passive_group_ids must be a list")
             if not isinstance(updated.relation_intent_keywords, dict):
                 raise ValueError("relation_intent_keywords must be an object")
             if any(
@@ -750,6 +1071,11 @@ class TierMemPlugin(Star):
                 "episodic_half_life_days": (0.1, 36500),
                 "working_half_life_days": (0.1, 36500),
                 "relation_half_life_days": (0.1, 36500),
+                "passive_group_fifo_size": (5, 500),
+                "passive_group_max_wait_minutes": (0, 10080),
+                "passive_group_max_buffer": (20, 5000),
+                "passive_group_recent_inject_limit": (0, 100),
+                "passive_group_min_message_length": (1, 100),
             }
             for key, (minimum, maximum) in numeric_ranges.items():
                 value = getattr(updated, key)
@@ -771,10 +1097,11 @@ class TierMemPlugin(Star):
         self._summary_semaphore = asyncio.Semaphore(
             max(1, int(self.config.max_concurrent_summaries))
         )
-        await self._restart_fifo_watchdog()
+        self._warn_passive_group_policy()
+        await self._restart_watchdogs()
         return json_response({"saved": True})
 
-    async def _restart_fifo_watchdog(self):
+    async def _restart_watchdogs(self):
         if self._fifo_watchdog_task:
             self._fifo_watchdog_task.cancel()
             try:
@@ -788,11 +1115,31 @@ class TierMemPlugin(Star):
             and self.config.fifo_max_wait_minutes > 0
         ):
             self._fifo_watchdog_task = asyncio.create_task(self._fifo_watchdog())
+        if self._group_watchdog_task:
+            self._group_watchdog_task.cancel()
+            try:
+                await self._group_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._group_watchdog_task = None
+        if (
+            self._initialized
+            and self.config.enable_passive_group_capture
+            and self.config.passive_group_max_wait_minutes > 0
+        ):
+            self._group_watchdog_task = asyncio.create_task(
+                self._passive_group_watchdog()
+            )
 
     def _user_lock(self, user_id):
         if user_id not in self._user_locks:
             self._user_locks[user_id] = asyncio.Lock()
         return self._user_locks[user_id]
+
+    def _group_lock(self, context_id):
+        if context_id not in self._group_locks:
+            self._group_locks[context_id] = asyncio.Lock()
+        return self._group_locks[context_id]
 
     async def _expire_pending(self, origin, pending_id):
         await asyncio.sleep(120)
@@ -915,12 +1262,30 @@ class TierMemPlugin(Star):
 
     async def terminate(self):
         self._initialized = False
+        set_active_plugin(None)
         if self._fifo_watchdog_task:
             self._fifo_watchdog_task.cancel()
             try:
                 await self._fifo_watchdog_task
             except asyncio.CancelledError:
                 pass
+        if self._group_watchdog_task:
+            self._group_watchdog_task.cancel()
+            try:
+                await self._group_watchdog_task
+            except asyncio.CancelledError:
+                pass
+        tasks = [
+            *self._passive_capture_tasks,
+            *self._group_summary_tasks.values(),
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._passive_capture_tasks.clear()
+        self._group_summary_tasks.clear()
+        self._group_summary_failures.clear()
         if self.db:
             await self.db.close()
         logger.info("TierMem 已卸载")

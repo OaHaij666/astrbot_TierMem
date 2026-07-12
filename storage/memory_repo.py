@@ -92,7 +92,9 @@ class MemoryRepository:
         background_limit: int = 4,
         query_term_limit: int = 24,
         context_id: Optional[str] = None,
+        additional_owner_ids: Optional[Sequence[str]] = None,
     ) -> AtomSearchResult:
+        owner_ids = list(dict.fromkeys([user_id, *(additional_owner_ids or [])]))
         status = await self.database.fts_status()
         terms = self._query_terms(query, query_term_limit)
         rows = []
@@ -100,7 +102,7 @@ class MemoryRepository:
         if query.strip() and terms and status["available"]:
             try:
                 rows = await self._search_fts(
-                    terms, user_id, categories, fts_candidate_limit, context_id
+                    terms, owner_ids, categories, fts_candidate_limit, context_id
                 )
             except aiosqlite.OperationalError:
                 rows = []
@@ -108,12 +110,12 @@ class MemoryRepository:
             mode = "like"
             like_terms = terms or self._like_terms(query, query_term_limit)
             rows = await self._search_like(
-                like_terms, user_id, categories, like_candidate_limit, context_id
+                like_terms, owner_ids, categories, like_candidate_limit, context_id
             )
         if not rows:
             mode = "background"
             rows = await self._search_background(
-                user_id,
+                owner_ids,
                 categories,
                 max(1, min(background_limit, limit)),
                 context_id,
@@ -207,31 +209,37 @@ class MemoryRepository:
             [context_id],
         )
 
-    async def _search_fts(self, terms, user_id, categories, limit, context_id):
+    def _owner_clause(self, owner_ids):
+        values = list(dict.fromkeys(owner_ids))
+        return f"m.owner_user_id IN ({','.join('?' for _ in values)})", values
+
+    async def _search_fts(self, terms, owner_ids, categories, limit, context_id):
         category_sql, category_params = self._scope_clause(categories)
         visibility_sql, visibility_params = self._visibility_clause(context_id)
+        owner_sql, owner_params = self._owner_clause(owner_ids)
         expression = " OR ".join(
             f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms
         )
         sql = (
             "SELECT m.*,bm25(memories_fts) AS raw_rank FROM memories_fts "
             "JOIN memories m ON m.rowid=memories_fts.rowid "
-            "WHERE memories_fts MATCH ? AND m.owner_user_id=? AND m.status='active'"
+            f"WHERE memories_fts MATCH ? AND {owner_sql} AND m.status='active'"
             + category_sql
             + visibility_sql
             + " ORDER BY bm25(memories_fts) ASC LIMIT ?"
         )
         async with self.db.execute(
             sql,
-            [expression, user_id, *category_params, *visibility_params, limit],
+            [expression, *owner_params, *category_params, *visibility_params, limit],
         ) as cursor:
             return await cursor.fetchall()
 
-    async def _search_like(self, terms, user_id, categories, limit, context_id):
+    async def _search_like(self, terms, owner_ids, categories, limit, context_id):
         if not terms:
             return []
         category_sql, category_params = self._scope_clause(categories)
         visibility_sql, visibility_params = self._visibility_clause(context_id)
+        owner_sql, owner_params = self._owner_clause(owner_ids)
         likes = " OR ".join("m.normalized_content LIKE ? ESCAPE '\\'" for _ in terms)
         patterns = [
             "%"
@@ -240,28 +248,29 @@ class MemoryRepository:
             for term in terms
         ]
         sql = (
-            "SELECT m.* FROM memories m WHERE m.owner_user_id=? AND m.status='active'"
+            f"SELECT m.* FROM memories m WHERE {owner_sql} AND m.status='active'"
             + category_sql
             + visibility_sql
             + f" AND ({likes}) ORDER BY m.updated_at DESC LIMIT ?"
         )
         async with self.db.execute(
             sql,
-            [user_id, *category_params, *visibility_params, *patterns, limit],
+            [*owner_params, *category_params, *visibility_params, *patterns, limit],
         ) as cursor:
             return await cursor.fetchall()
 
-    async def _search_background(self, user_id, categories, limit, context_id):
+    async def _search_background(self, owner_ids, categories, limit, context_id):
         category_sql, category_params = self._scope_clause(categories)
         visibility_sql, visibility_params = self._visibility_clause(context_id)
+        owner_sql, owner_params = self._owner_clause(owner_ids)
         sql = (
-            "SELECT m.* FROM memories m WHERE m.owner_user_id=? AND m.status='active'"
+            f"SELECT m.* FROM memories m WHERE {owner_sql} AND m.status='active'"
             + category_sql
             + visibility_sql
             + " ORDER BY m.importance DESC,m.confidence DESC,m.updated_at DESC LIMIT ?"
         )
         async with self.db.execute(
-            sql, [user_id, *category_params, *visibility_params, limit]
+            sql, [*owner_params, *category_params, *visibility_params, limit]
         ) as cursor:
             return await cursor.fetchall()
 

@@ -40,6 +40,7 @@ class SQLiteDB:
                 DROP TRIGGER IF EXISTS memories_au; DROP TABLE IF EXISTS memories_fts;
                 DROP TABLE IF EXISTS memory_entity_mentions;
                 DROP TABLE IF EXISTS relation_evidence; DROP TABLE IF EXISTS relations;
+                DROP TABLE IF EXISTS group_observation_buffer;
                 DROP TABLE IF EXISTS entities; DROP TABLE IF EXISTS fifo_buffer;
                 DROP TABLE IF EXISTS memories; DROP TABLE IF EXISTS meta;"""
             )
@@ -111,6 +112,20 @@ class SQLiteDB:
               timestamp TEXT NOT NULL, group_id TEXT);
             CREATE INDEX IF NOT EXISTS idx_fifo_user ON fifo_buffer(user_id,id);
             CREATE INDEX IF NOT EXISTS idx_fifo_context ON fifo_buffer(context_id,id);
+
+            CREATE TABLE IF NOT EXISTS group_observation_buffer (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              observation_id TEXT NOT NULL UNIQUE,
+              context_id TEXT NOT NULL,
+              group_id TEXT NOT NULL,
+              sender_user_id TEXT NOT NULL,
+              sender_name TEXT NOT NULL,
+              content TEXT NOT NULL,
+              timestamp TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_group_observation_context
+              ON group_observation_buffer(context_id,id);
+            CREATE INDEX IF NOT EXISTS idx_group_observation_oldest
+              ON group_observation_buffer(timestamp);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT);
             INSERT INTO meta(key,value) VALUES('schema_version','4')
               ON CONFLICT(key) DO UPDATE SET value=excluded.value;

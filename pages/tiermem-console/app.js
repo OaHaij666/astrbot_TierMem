@@ -79,6 +79,15 @@ const demoSettings = {
   inject_memory_in_private: true,
   inject_memory_in_group: true,
   inject_fifo_in_group: true,
+  enable_passive_group_capture: false,
+  passive_group_filter_mode: "whitelist",
+  passive_group_ids: [],
+  passive_group_fifo_size: 30,
+  passive_group_max_wait_minutes: 15,
+  passive_group_max_buffer: 200,
+  passive_group_recent_inject_limit: 12,
+  passive_group_min_message_length: 2,
+  passive_group_summary_system_prompt: "",
   relation_intent_keywords: {
     friend_of: ["朋友", "好友"],
     colleague_of: ["同事", "共事"],
@@ -133,6 +142,7 @@ const mockBridge = {
         entities: 34,
         relations: 42,
         fifo: 7,
+        group_observations: 0,
         layers: { core: 20, semantic: 61, episodic: 31, working: 16 },
         fts: { available: true, tokenizer: "trigram" },
       };
@@ -285,6 +295,7 @@ async function loadOverview() {
     entities: "图谱实体",
     relations: "活跃关系",
     fifo: "待总结轮次",
+    group_observations: "群观察缓存",
   };
   const metrics = $("#metrics");
   const cards = Object.entries(labels).map(([key, label]) => {
@@ -683,6 +694,13 @@ const settingGroups = {
     ["graph_entity_scan_limit", "实体扫描上限", 1],
     ["retrieval_min_strength", "最低有效强度", 0.01],
   ],
+  "#settings-group-capture": [
+    ["passive_group_fifo_size", "群消息总结阈值", 1],
+    ["passive_group_max_wait_minutes", "最大等待（分钟）", 0.1],
+    ["passive_group_max_buffer", "单群缓存上限", 1],
+    ["passive_group_recent_inject_limit", "近期消息注入数", 1],
+    ["passive_group_min_message_length", "最短消息字符数", 1],
+  ],
   "#settings-decay": [
     ["core_half_life_days", "Core 半衰期（天）", 0.1],
     ["semantic_half_life_days", "Semantic 半衰期（天）", 0.1],
@@ -699,6 +717,7 @@ const switchSettings = [
   ["inject_memory_in_private", "私聊注入"],
   ["inject_memory_in_group", "群聊注入"],
   ["inject_fifo_in_group", "群聊 FIFO 注入"],
+  ["enable_passive_group_capture", "被动群聊观察"],
 ];
 
 function buildSettingsForm() {
@@ -735,10 +754,12 @@ async function loadSettings() {
   buildSettingsForm();
   state.settings = await bridge.apiGet("settings");
   $("#settings-form")
-    .querySelectorAll("input[name], textarea[name]")
+    .querySelectorAll("input[name], textarea[name], select[name]")
     .forEach((input) => {
       const value = state.settings[input.name];
       if (input.type === "checkbox") input.checked = Boolean(value);
+      else if (input.dataset.kind === "list")
+        input.value = Array.isArray(value) ? value.join("\n") : "";
       else input.value = value ?? "";
     });
   $("#intent-keywords").value = JSON.stringify(
@@ -754,11 +775,16 @@ $("#settings-form").addEventListener("submit", async (event) => {
   await withBusy(button, async () => {
     const payload = {};
     event.currentTarget
-      .querySelectorAll("input[name], textarea[name]")
+      .querySelectorAll("input[name], textarea[name], select[name]")
       .forEach((input) => {
         payload[input.name] =
           input.type === "checkbox"
             ? input.checked
+            : input.dataset.kind === "list"
+              ? input.value
+                  .split(/[\n,]+/)
+                  .map((item) => item.trim())
+                  .filter(Boolean)
             : input.type === "number"
               ? Number(input.value)
               : input.value;

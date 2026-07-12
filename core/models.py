@@ -206,6 +206,23 @@ class ConversationTurn:
 
 
 @dataclass
+class GroupObservation:
+    observation_id: str
+    context_id: str
+    group_id: str
+    sender_user_id: str
+    sender_name: str
+    content: str
+    timestamp: str = field(default_factory=utc_now)
+
+    def to_prompt_text(self) -> str:
+        return (
+            f"[{self.timestamp}] {self.sender_name}<user:{self.sender_user_id}>: "
+            f"{self.content}"
+        )
+
+
+@dataclass
 class MemoryOperation:
     action: str
     memory_id: Optional[str] = None

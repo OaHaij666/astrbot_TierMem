@@ -19,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +130,51 @@ class MockContext:
         self.routes.append((route, tuple(methods), desc, handler))
 
 
+@unittest.skipUnless(ASTRBOT_AVAILABLE, "run with AstrBot's Python environment")
+class AstrBotPassiveFilterTests(unittest.TestCase):
+    def test_filter_captures_whitelisted_group_without_waking_bot(self):
+        sys.path.insert(0, str(ROOT))
+        from astrbot.api.platform import MessageType
+        from core.config import PluginConfig
+        from service.passive_group_capture import PassiveGroupCaptureFilter
+
+        plugin = SimpleNamespace(
+            _initialized=True,
+            config=PluginConfig(
+                enable_passive_group_capture=True,
+                passive_group_ids=["g1"],
+            ),
+            _schedule_passive_group_capture=Mock(),
+        )
+        event = Mock()
+        event.get_message_type.return_value = MessageType.GROUP_MESSAGE
+        event.get_group_id.return_value = "g1"
+        capture_filter = PassiveGroupCaptureFilter(plugin)
+        self.assertFalse(capture_filter.filter(event, {}))
+        plugin._schedule_passive_group_capture.assert_called_once_with(event)
+
+    def test_filter_rejects_group_outside_whitelist(self):
+        sys.path.insert(0, str(ROOT))
+        from astrbot.api.platform import MessageType
+        from core.config import PluginConfig
+        from service.passive_group_capture import PassiveGroupCaptureFilter
+
+        plugin = SimpleNamespace(
+            _initialized=True,
+            config=PluginConfig(
+                enable_passive_group_capture=True,
+                passive_group_ids=["g1"],
+            ),
+            _schedule_passive_group_capture=Mock(),
+        )
+        event = Mock()
+        event.get_message_type.return_value = MessageType.GROUP_MESSAGE
+        event.get_group_id.return_value = "g2"
+        capture_filter = PassiveGroupCaptureFilter(plugin)
+        self.assertFalse(capture_filter.filter(event, {}))
+        plugin._schedule_passive_group_capture.assert_not_called()
+
+
 @unittest.skipUnless(
     SETTINGS.enabled and bool(SETTINGS.api_key) and ASTRBOT_AVAILABLE,
     LIVE_REASON,
@@ -142,7 +188,7 @@ class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
         sys.path.insert(0, str(ROOT))
         import main as tiermem_main
         from astrbot.api.web import PluginRequest, bind_request_context
-        from core.models import ConversationTurn, utc_now
+        from core.models import ConversationTurn, GroupObservation, utc_now
         from starlette.requests import Request
 
         def plugin_request(method: str, path: str, payload: dict | None = None):
@@ -187,6 +233,10 @@ class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
                         "测试数据中 user:u2 是已确认的稳定用户 ID。"
                         "必须提取当前用户喜欢杀戮尖塔的 preference 原子，"
                         "以及 user:u1 与 user:u2 的 friend_of 关系。"
+                    ),
+                    "passive_group_summary_system_prompt": (
+                        "测试消息中的发布计划已经由多人明确确认。"
+                        "必须提取 TierMem v2 周五 20:00 发布这一 episodic/event 原子。"
                     ),
                 },
             )
@@ -301,6 +351,71 @@ class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(recall_payload["atoms"])
             self.assertTrue(recall_payload["evidence_edges"])
             self.assertTrue(recall_payload["relations"])
+
+            group_observations = [
+                GroupObservation(
+                    "group-live-1",
+                    "group:g-test",
+                    "g-test",
+                    "u1",
+                    "小林",
+                    "TierMem v2 的发布时间确定为本周五 20:00。",
+                ),
+                GroupObservation(
+                    "group-live-2",
+                    "group:g-test",
+                    "g-test",
+                    "u2",
+                    "小王",
+                    "确认周五 20:00 发布，我负责发布文档。",
+                ),
+                GroupObservation(
+                    "group-live-3",
+                    "group:g-test",
+                    "g-test",
+                    "u1",
+                    "小林",
+                    "好的，发布计划就按这个时间执行。",
+                ),
+            ]
+            for observation in group_observations:
+                await plugin.group_observation_repo.append(observation)
+            group_result = await plugin.group_summarizer.summarize_group(
+                group_observations, [], [], "group:g-test"
+            )
+            self.assertTrue(
+                any(
+                    operation.category == "event"
+                    and operation.content
+                    and "周五" in operation.content
+                    and "20:00" in operation.content
+                    for operation in group_result.memory_operations
+                )
+            )
+            await plugin._apply_group_summary(
+                "group:g-test", "g-test", group_observations, group_result
+            )
+            self.assertEqual(
+                await plugin.group_observation_repo.count("group:g-test"), 0
+            )
+            group_recall = await plugin.graph_retriever.recall(
+                "u3", "TierMem v2 是什么时候发布？", "group:g-test"
+            )
+            self.assertTrue(
+                any(
+                    memory.owner_user_id == "group:g-test" and "周五" in memory.content
+                    for memory in group_recall.memories
+                )
+            )
+            private_group_leak = await plugin.graph_retriever.recall(
+                "u3", "TierMem v2 是什么时候发布？", "private:u3"
+            )
+            self.assertFalse(
+                any(
+                    memory.owner_user_id == "group:g-test"
+                    for memory in private_group_leak.memories
+                )
+            )
         finally:
             if plugin is not None:
                 await plugin.terminate()

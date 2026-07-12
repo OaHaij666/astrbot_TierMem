@@ -40,6 +40,16 @@ class PluginConfig:
     inject_memory_in_group: bool = True
     inject_fifo_in_group: bool = True
 
+    enable_passive_group_capture: bool = False
+    passive_group_filter_mode: str = "whitelist"
+    passive_group_ids: list = field(default_factory=list)
+    passive_group_fifo_size: int = 30
+    passive_group_max_wait_minutes: float = 15.0
+    passive_group_max_buffer: int = 200
+    passive_group_recent_inject_limit: int = 12
+    passive_group_min_message_length: int = 2
+    passive_group_summary_system_prompt: str = ""
+
     enable_auto_summary: bool = True
     enable_manual_summary: bool = True
     enable_llm_tools: bool = True
@@ -71,6 +81,17 @@ class PluginConfig:
             except (TypeError, ValueError):
                 values["relation_intent_keywords"] = default_relation_intent_keywords()
         return cls(**values)
+
+    def allows_passive_group(self, group_id: str) -> bool:
+        if not self.enable_passive_group_capture:
+            return False
+        normalized = {
+            str(item).strip() for item in self.passive_group_ids if str(item).strip()
+        }
+        group_id = str(group_id).strip()
+        if self.passive_group_filter_mode == "blacklist":
+            return group_id not in normalized
+        return bool(normalized) and group_id in normalized
 
     def half_life_for_layer(self, layer: str) -> float:
         return {

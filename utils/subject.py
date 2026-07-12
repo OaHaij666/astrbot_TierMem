@@ -15,16 +15,21 @@ def detect_scene(event) -> str:
 
 
 def extract_context_id(event) -> str:
-    origin = getattr(event, "unified_msg_origin", "") or ""
-    parts = origin.split(":")
     if detect_scene(event) == "group":
-        return f"group:{parts[-1] if parts else 'unknown'}"
+        return f"group:{extract_group_id(event) or 'unknown'}"
     return f"private:{extract_user_id(event)}"
 
 
 def extract_group_id(event):
     if detect_scene(event) != "group":
         return None
+    if hasattr(event, "get_group_id"):
+        try:
+            group_id = event.get_group_id()
+            if group_id:
+                return str(group_id)
+        except Exception:
+            pass
     origin = getattr(event, "unified_msg_origin", "") or ""
     parts = origin.split(":")
     return parts[-1] if parts else None

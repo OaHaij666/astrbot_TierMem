@@ -82,6 +82,9 @@ class GraphRetriever:
                 background_limit=getattr(self.config, "atom_background_limit", 4),
                 query_term_limit=getattr(self.config, "atom_query_term_limit", 24),
                 context_id=context_id,
+                additional_owner_ids=(
+                    [context_id] if context_id.startswith("group:") else []
+                ),
             )
         memory_ids = (
             [hit.memory.memory_id for hit in atom_search.hits] if atom_search else []

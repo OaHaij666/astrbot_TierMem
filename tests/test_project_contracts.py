@@ -31,6 +31,9 @@ class ProjectContractTests(unittest.TestCase):
         )
         self.assertEqual(schema["relation_intent_keywords"]["type"], "text")
         json.loads(schema["relation_intent_keywords"]["default"])
+        self.assertFalse(schema["enable_passive_group_capture"]["default"])
+        self.assertEqual(schema["passive_group_filter_mode"]["default"], "whitelist")
+        self.assertEqual(schema["passive_group_ids"]["default"], [])
 
     def test_example_env_contains_no_real_secret(self):
         example = (ROOT / ".env.example").read_text(encoding="utf-8")

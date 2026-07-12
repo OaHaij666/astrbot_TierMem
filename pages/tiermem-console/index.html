@@ -282,6 +282,36 @@
               <div class="field-grid" id="settings-queue"></div>
             </fieldset>
             <fieldset class="panel">
+              <legend>被动群聊观察</legend>
+              <div class="field-grid">
+                <label
+                  >名单模式<select name="passive_group_filter_mode">
+                    <option value="whitelist">白名单</option>
+                    <option value="blacklist">黑名单</option>
+                  </select></label
+                >
+                <label
+                  >群 ID 名单<textarea
+                    name="passive_group_ids"
+                    data-kind="list"
+                    rows="5"
+                    placeholder="每行一个群 ID"
+                  ></textarea></label
+                >
+              </div>
+              <div class="field-grid" id="settings-group-capture"></div>
+              <label
+                >群观察额外提示词<textarea
+                  name="passive_group_summary_system_prompt"
+                  rows="4"
+                  placeholder="仅追加给群观察总结器"
+                ></textarea>
+              </label>
+              <p class="helper">
+                功能默认关闭；白名单模式下名单为空时不会捕获任何群。黑名单模式下空名单表示允许所有群，请谨慎使用。
+              </p>
+            </fieldset>
+            <fieldset class="panel">
               <legend>召回策略</legend>
               <div class="field-grid" id="settings-recall"></div>
             </fieldset>
