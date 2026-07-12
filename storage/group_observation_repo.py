@@ -58,6 +58,23 @@ class GroupObservationRepository:
         ) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
 
+    async def list_streams(self):
+        async with self.db.execute(
+            """SELECT context_id,group_id,MIN(timestamp) oldest_at,COUNT(*) message_count
+            FROM group_observation_buffer GROUP BY context_id,group_id"""
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_stream(self, context_id: str):
+        async with self.db.execute(
+            """SELECT context_id,group_id,MIN(timestamp) oldest_at,COUNT(*) message_count
+            FROM group_observation_buffer WHERE context_id=?
+            GROUP BY context_id,group_id""",
+            (context_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def trim(self, context_id: str, keep: int):
         async with self.database.transaction():
             await self.db.execute(

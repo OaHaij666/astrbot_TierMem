@@ -132,47 +132,53 @@ class MockContext:
 
 @unittest.skipUnless(ASTRBOT_AVAILABLE, "run with AstrBot's Python environment")
 class AstrBotPassiveFilterTests(unittest.TestCase):
-    def test_filter_captures_whitelisted_group_without_waking_bot(self):
+    def test_group_tap_emits_snapshot_without_waking_bot(self):
         sys.path.insert(0, str(ROOT))
         from astrbot.api.platform import MessageType
-        from core.config import PluginConfig
-        from service.passive_group_capture import PassiveGroupCaptureFilter
-
-        plugin = SimpleNamespace(
-            _initialized=True,
-            config=PluginConfig(
-                enable_passive_group_capture=True,
-                passive_group_ids=["g1"],
-            ),
-            _schedule_passive_group_capture=Mock(),
+        from service.passive_group_capture import (
+            PassiveGroupMessageTap,
+            bind_capture_sink,
+            unbind_capture_sink,
         )
+
+        snapshots = []
+        token = bind_capture_sink(snapshots.append)
         event = Mock()
         event.get_message_type.return_value = MessageType.GROUP_MESSAGE
         event.get_group_id.return_value = "g1"
-        capture_filter = PassiveGroupCaptureFilter(plugin)
-        self.assertFalse(capture_filter.filter(event, {}))
-        plugin._schedule_passive_group_capture.assert_called_once_with(event)
+        event.get_sender_id.return_value = "u1"
+        event.get_sender_name.return_value = "小林"
+        event.get_self_id.return_value = "bot"
+        event.unified_msg_origin = "platform:GroupMessage:g1"
+        event.message_str = "普通群消息"
+        event.message_obj = SimpleNamespace(message_id="m1")
+        try:
+            self.assertFalse(PassiveGroupMessageTap(False).filter(event, {}))
+        finally:
+            unbind_capture_sink(token)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].context_id, "group:g1")
+        self.assertEqual(snapshots[0].sender_user_id, "u1")
+        self.assertEqual(snapshots[0].content, "普通群消息")
 
-    def test_filter_rejects_group_outside_whitelist(self):
+    def test_non_group_event_never_reaches_sink(self):
         sys.path.insert(0, str(ROOT))
         from astrbot.api.platform import MessageType
-        from core.config import PluginConfig
-        from service.passive_group_capture import PassiveGroupCaptureFilter
-
-        plugin = SimpleNamespace(
-            _initialized=True,
-            config=PluginConfig(
-                enable_passive_group_capture=True,
-                passive_group_ids=["g1"],
-            ),
-            _schedule_passive_group_capture=Mock(),
+        from service.passive_group_capture import (
+            PassiveGroupMessageTap,
+            bind_capture_sink,
+            unbind_capture_sink,
         )
+
+        snapshots = []
+        token = bind_capture_sink(snapshots.append)
         event = Mock()
-        event.get_message_type.return_value = MessageType.GROUP_MESSAGE
-        event.get_group_id.return_value = "g2"
-        capture_filter = PassiveGroupCaptureFilter(plugin)
-        self.assertFalse(capture_filter.filter(event, {}))
-        plugin._schedule_passive_group_capture.assert_not_called()
+        event.get_message_type.return_value = MessageType.FRIEND_MESSAGE
+        try:
+            self.assertFalse(PassiveGroupMessageTap(False).filter(event, {}))
+        finally:
+            unbind_capture_sink(token)
+        self.assertEqual(snapshots, [])
 
 
 @unittest.skipUnless(
@@ -187,8 +193,10 @@ class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_summary_storage_and_atom_first_recall_pipeline(self):
         sys.path.insert(0, str(ROOT))
         import main as tiermem_main
+        from astrbot.api.platform import MessageType
         from astrbot.api.web import PluginRequest, bind_request_context
         from core.models import ConversationTurn, GroupObservation, utc_now
+        from service.passive_group_capture import PassiveGroupMessageTap
         from starlette.requests import Request
 
         def plugin_request(method: str, path: str, payload: dict | None = None):
@@ -238,9 +246,28 @@ class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
                         "测试消息中的发布计划已经由多人明确确认。"
                         "必须提取 TierMem v2 周五 20:00 发布这一 episodic/event 原子。"
                     ),
+                    "enable_passive_group_capture": True,
+                    "passive_group_ids": ["g-capture", "g-test"],
+                    "passive_group_max_wait_minutes": 0,
                 },
             )
             await plugin.initialize()
+            capture_event = Mock()
+            capture_event.get_message_type.return_value = MessageType.GROUP_MESSAGE
+            capture_event.get_group_id.return_value = "g-capture"
+            capture_event.get_sender_id.return_value = "u-capture"
+            capture_event.get_sender_name.return_value = "旁听用户"
+            capture_event.get_self_id.return_value = "bot"
+            capture_event.unified_msg_origin = "platform:GroupMessage:g-capture"
+            capture_event.message_str = "这是没有唤醒 Bot 的普通群消息"
+            capture_event.message_obj = SimpleNamespace(message_id="capture-live-1")
+            self.assertFalse(PassiveGroupMessageTap(False).filter(capture_event, {}))
+            await asyncio.gather(*list(plugin.group_observer._ingest_tasks))
+            self.assertEqual(
+                await plugin.group_observation_repo.count("group:g-capture"), 1
+            )
+            await plugin.group_observation_repo.clear_context("group:g-capture")
+
             turn = ConversationTurn(
                 turn_id="live-turn-1",
                 user_id="u1",

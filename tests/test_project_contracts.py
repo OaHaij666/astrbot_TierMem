@@ -44,8 +44,12 @@ class ProjectContractTests(unittest.TestCase):
     def test_public_version_and_legacy_branch_are_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+        license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
         self.assertIn("# TierMem v2", readme)
         self.assertIn("v1-legacy", readme)
+        self.assertIn("MIT License", readme)
+        self.assertTrue(license_text.startswith("MIT License"))
+        self.assertIn("Copyright (c) 2026 OaHaij666", license_text)
         self.assertIn("version: v2.0.0", metadata)
 
     def test_plugin_page_assets_are_complete(self):
