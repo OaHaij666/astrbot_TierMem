@@ -1,8 +1,15 @@
-from core.config import PluginConfig
-from storage.fifo_repo import FifoRepository
-from storage.graph_repo import GraphRepository
-from storage.memory_repo import MemoryRepository
-from utils.subject import extract_context_id, extract_user_id
+if __package__ and "." in __package__:
+    from ..core.config import PluginConfig
+    from ..storage.fifo_repo import FifoRepository
+    from ..storage.graph_repo import GraphRepository
+    from ..storage.memory_repo import MemoryRepository
+    from ..utils.subject import extract_context_id, extract_user_id
+else:
+    from core.config import PluginConfig
+    from storage.fifo_repo import FifoRepository
+    from storage.graph_repo import GraphRepository
+    from storage.memory_repo import MemoryRepository
+    from utils.subject import extract_context_id, extract_user_id
 
 
 class CommandHandler:

@@ -19,50 +19,93 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from api.commands import CommandHandler
-from api.tools import MemoryTools
-from core.config import PluginConfig
-from core.exceptions import SummaryError
-from core.models import (
-    ConversationTurn,
-    Entity,
-    MemoryEntry,
-    Relation,
-    RelationEvidence,
-    decay_rate_from_half_life,
-    utc_now,
-)
-from service.backup import BackupService
-from service.graph_retriever import GraphRetriever
-from service.group_observer import GroupObserver
-from service.group_summarizer import GroupSummarizer
-from service.injector import Injector
-from service.passive_group_capture import (
-    PassiveGroupMessageTap,
-    bind_capture_sink,
-    unbind_capture_sink,
-)
-from service.summarizer import Summarizer
-from storage.database import SQLiteDB
-from storage.fifo_repo import FifoRepository
-from storage.graph_repo import GraphRepository
-from storage.group_observation_repo import GroupObservationRepository
-from storage.memory_repo import MemoryRepository
-from utils.id_gen import (
-    generate_evidence_id,
-    generate_memory_id,
-    generate_relation_id,
-    generate_turn_id,
-)
-from utils.subject import (
-    detect_scene,
-    extract_context_id,
-    extract_group_id,
-    extract_user_id,
-)
+if __package__:
+    from .api.commands import CommandHandler
+    from .api.tools import MemoryTools
+    from .core.config import PluginConfig
+    from .core.exceptions import SummaryError
+    from .core.models import (
+        ConversationTurn,
+        Entity,
+        MemoryEntry,
+        Relation,
+        RelationEvidence,
+        decay_rate_from_half_life,
+        utc_now,
+    )
+    from .service.backup import BackupService
+    from .service.graph_retriever import GraphRetriever
+    from .service.group_observer import GroupObserver
+    from .service.group_summarizer import GroupSummarizer
+    from .service.injector import Injector
+    from .service.passive_group_capture import (
+        PassiveGroupMessageTap,
+        bind_capture_sink,
+        unbind_capture_sink,
+    )
+    from .service.summarizer import Summarizer
+    from .storage.database import SQLiteDB
+    from .storage.fifo_repo import FifoRepository
+    from .storage.graph_repo import GraphRepository
+    from .storage.group_observation_repo import GroupObservationRepository
+    from .storage.memory_repo import MemoryRepository
+    from .utils.id_gen import (
+        generate_evidence_id,
+        generate_memory_id,
+        generate_relation_id,
+        generate_turn_id,
+    )
+    from .utils.subject import (
+        detect_scene,
+        extract_context_id,
+        extract_group_id,
+        extract_user_id,
+    )
+else:  # Direct source-tree imports used by the standalone test runner.
+    from api.commands import CommandHandler
+    from api.tools import MemoryTools
+    from core.config import PluginConfig
+    from core.exceptions import SummaryError
+    from core.models import (
+        ConversationTurn,
+        Entity,
+        MemoryEntry,
+        Relation,
+        RelationEvidence,
+        decay_rate_from_half_life,
+        utc_now,
+    )
+    from service.backup import BackupService
+    from service.graph_retriever import GraphRetriever
+    from service.group_observer import GroupObserver
+    from service.group_summarizer import GroupSummarizer
+    from service.injector import Injector
+    from service.passive_group_capture import (
+        PassiveGroupMessageTap,
+        bind_capture_sink,
+        unbind_capture_sink,
+    )
+    from service.summarizer import Summarizer
+    from storage.database import SQLiteDB
+    from storage.fifo_repo import FifoRepository
+    from storage.graph_repo import GraphRepository
+    from storage.group_observation_repo import GroupObservationRepository
+    from storage.memory_repo import MemoryRepository
+    from utils.id_gen import (
+        generate_evidence_id,
+        generate_memory_id,
+        generate_relation_id,
+        generate_turn_id,
+    )
+    from utils.subject import (
+        detect_scene,
+        extract_context_id,
+        extract_group_id,
+        extract_user_id,
+    )
 
 
-@register("astrbot_TierMem", "TierMem", "原子记忆 + 关系知识图谱", "2.0.0")
+@register("astrbot_TierMem", "TierMem", "原子记忆 + 关系知识图谱", "2.0.1")
 class TierMemPlugin(Star):
     _NICKNAME_CACHE_MAX = 2000
 

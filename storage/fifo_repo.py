@@ -1,5 +1,9 @@
-from core.models import ConversationTurn
-from storage.database import SQLiteDB
+if __package__ and "." in __package__:
+    from ..core.models import ConversationTurn
+    from .database import SQLiteDB
+else:
+    from core.models import ConversationTurn
+    from storage.database import SQLiteDB
 
 
 class FifoRepository:

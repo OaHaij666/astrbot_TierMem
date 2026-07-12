@@ -2,6 +2,7 @@ from .config import PluginConfig
 from .models import (
     ConversationTurn,
     Entity,
+    GroupObservation,
     MemoryEntry,
     MemoryOperation,
     MemoryState,
@@ -19,6 +20,7 @@ __all__ = [
     "Relation",
     "RelationEvidence",
     "ConversationTurn",
+    "GroupObservation",
     "MemoryOperation",
     "RelationOperation",
     "SummaryResult",

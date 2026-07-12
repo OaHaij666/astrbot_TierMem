@@ -1,8 +1,15 @@
-from core.config import PluginConfig
-from core.models import MemoryEntry, decay_rate_from_half_life, utc_now
-from storage.memory_repo import MemoryRepository
-from utils.id_gen import generate_memory_id
-from utils.subject import extract_user_id
+if __package__ and "." in __package__:
+    from ..core.config import PluginConfig
+    from ..core.models import MemoryEntry, decay_rate_from_half_life, utc_now
+    from ..storage.memory_repo import MemoryRepository
+    from ..utils.id_gen import generate_memory_id
+    from ..utils.subject import extract_user_id
+else:
+    from core.config import PluginConfig
+    from core.models import MemoryEntry, decay_rate_from_half_life, utc_now
+    from storage.memory_repo import MemoryRepository
+    from utils.id_gen import generate_memory_id
+    from utils.subject import extract_user_id
 
 
 LAYERS = ("core", "semantic", "episodic", "working")

@@ -1,9 +1,15 @@
 import json
 
-from core.exceptions import ProviderNotFoundError, SummaryError
-from core.models import SummaryResult
-from service.summarizer import Summarizer
-from utils.json_helper import safe_json_loads
+if __package__ and "." in __package__:
+    from ..core.exceptions import ProviderNotFoundError, SummaryError
+    from ..core.models import SummaryResult
+    from ..utils.json_helper import safe_json_loads
+    from .summarizer import Summarizer
+else:
+    from core.exceptions import ProviderNotFoundError, SummaryError
+    from core.models import SummaryResult
+    from service.summarizer import Summarizer
+    from utils.json_helper import safe_json_loads
 
 
 class GroupSummarizer(Summarizer):

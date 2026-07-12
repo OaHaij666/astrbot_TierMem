@@ -5,8 +5,12 @@ from typing import List, Optional, Sequence
 
 import aiosqlite
 
-from core.models import MemoryEntry, MemoryState, utc_now
-from storage.database import SQLiteDB
+if __package__ and "." in __package__:
+    from ..core.models import MemoryEntry, MemoryState, utc_now
+    from .database import SQLiteDB
+else:
+    from core.models import MemoryEntry, MemoryState, utc_now
+    from storage.database import SQLiteDB
 
 
 def normalize_content(content: str) -> str:

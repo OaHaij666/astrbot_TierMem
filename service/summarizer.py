@@ -5,10 +5,16 @@ from typing import List
 from astrbot.api import logger
 from astrbot.api.star import Context
 
-from core.config import PluginConfig
-from core.exceptions import ProviderNotFoundError, SummaryError
-from core.models import ConversationTurn, MemoryEntry, Relation, SummaryResult
-from utils.json_helper import safe_json_loads
+if __package__ and "." in __package__:
+    from ..core.config import PluginConfig
+    from ..core.exceptions import ProviderNotFoundError, SummaryError
+    from ..core.models import ConversationTurn, MemoryEntry, Relation, SummaryResult
+    from ..utils.json_helper import safe_json_loads
+else:
+    from core.config import PluginConfig
+    from core.exceptions import ProviderNotFoundError, SummaryError
+    from core.models import ConversationTurn, MemoryEntry, Relation, SummaryResult
+    from utils.json_helper import safe_json_loads
 
 
 class Summarizer:

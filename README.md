@@ -110,6 +110,8 @@ git clone https://github.com/OaHaij666/astrbot_plugin_TierMem.git
 
 依赖 Python 3.10+、`aiosqlite` 和 `json-repair`。重启 AstrBot 后插件会自动创建 SQLite 数据库。
 
+`v2.0.1` 起内部模块使用插件包命名空间，可在 AstrBot 热更新时避开旧版顶层模块缓存。
+
 v2 不迁移旧格式数据，检测到旧数据库结构时会重新建库。
 
 ## 测试

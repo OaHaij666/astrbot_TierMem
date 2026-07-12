@@ -1,12 +1,21 @@
 from typing import Dict, List, Optional
 
-from core.models import (
-    ConversationTurn,
-    Entity,
-    GroupObservation,
-    MemoryEntry,
-    Relation,
-)
+if __package__ and "." in __package__:
+    from ..core.models import (
+        ConversationTurn,
+        Entity,
+        GroupObservation,
+        MemoryEntry,
+        Relation,
+    )
+else:
+    from core.models import (
+        ConversationTurn,
+        Entity,
+        GroupObservation,
+        MemoryEntry,
+        Relation,
+    )
 
 
 class Injector:

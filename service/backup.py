@@ -3,7 +3,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import List
 from astrbot.api import logger
-from storage.database import SQLiteDB
+
+if __package__ and "." in __package__:
+    from ..storage.database import SQLiteDB
+else:
+    from storage.database import SQLiteDB
 
 
 class BackupService:

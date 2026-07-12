@@ -3,8 +3,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from core.models import Entity, Relation, RelationEvidence
-from storage.memory_repo import AtomSearchResult
+if __package__ and "." in __package__:
+    from ..core.models import Entity, Relation, RelationEvidence
+    from ..storage.memory_repo import AtomSearchResult
+else:
+    from core.models import Entity, Relation, RelationEvidence
+    from storage.memory_repo import AtomSearchResult
 
 
 _UID_PATTERN = re.compile(r"\{\{uid:([^}]+)\}\}|@([A-Za-z0-9_-]{3,})")

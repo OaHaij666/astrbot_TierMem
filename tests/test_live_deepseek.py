@@ -11,6 +11,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -132,6 +133,40 @@ class MockContext:
 
 @unittest.skipUnless(ASTRBOT_AVAILABLE, "run with AstrBot's Python environment")
 class AstrBotPassiveFilterTests(unittest.TestCase):
+    def test_packaged_import_survives_stale_core_models_cache(self):
+        script = f"""
+import importlib
+import sys
+import types
+sys.path.insert(0, {str(ROOT)!r})
+stale = importlib.import_module('core.models')
+del stale.GroupObservation
+data = types.ModuleType('data')
+data.__path__ = []
+plugins = types.ModuleType('data.plugins')
+plugins.__path__ = []
+package = types.ModuleType('data.plugins.astrbot_TierMem')
+package.__path__ = [{str(ROOT)!r}]
+sys.modules['data'] = data
+sys.modules['data.plugins'] = plugins
+sys.modules['data.plugins.astrbot_TierMem'] = package
+plugin = importlib.import_module('data.plugins.astrbot_TierMem.main')
+assert plugin.TierMemPlugin.__name__ == 'TierMemPlugin'
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT.parent,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+
     def test_group_tap_emits_snapshot_without_waking_bot(self):
         sys.path.insert(0, str(ROOT))
         from astrbot.api.platform import MessageType

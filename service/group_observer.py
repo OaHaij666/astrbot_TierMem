@@ -11,10 +11,16 @@ except ModuleNotFoundError:  # Allows the storage/orchestration tests to run sta
     logger = logging.getLogger("tiermem.group_observer")
     sp = None
 
-from core.models import GroupObservation
+if __package__ and "." in __package__:
+    from ..core.models import GroupObservation
+else:
+    from core.models import GroupObservation
 
 if TYPE_CHECKING:
-    from service.passive_group_capture import GroupMessageSnapshot
+    if __package__ and "." in __package__:
+        from .passive_group_capture import GroupMessageSnapshot
+    else:
+        from service.passive_group_capture import GroupMessageSnapshot
 
 
 class GroupCapturePolicy:

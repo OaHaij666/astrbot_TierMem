@@ -1,4 +1,6 @@
+import importlib
 import json
+import sys
 import unittest
 from pathlib import Path
 
@@ -50,12 +52,29 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIn("MIT License", readme)
         self.assertTrue(license_text.startswith("MIT License"))
         self.assertIn("Copyright (c) 2026 OaHaij666", license_text)
-        self.assertIn("version: v2.0.0", metadata)
+        self.assertIn("version: v2.0.1", metadata)
 
     def test_plugin_page_assets_are_complete(self):
         page = ROOT / "pages" / "tiermem-console"
         for filename in ("index.html", "style.css", "app.js"):
             self.assertGreater((page / filename).stat().st_size, 100)
+
+    def test_packaged_group_observer_ignores_stale_top_level_core_module(self):
+        """AstrBot hot updates may retain an old top-level core.models object."""
+        stale_models = importlib.import_module("core.models")
+        original = stale_models.GroupObservation
+        del stale_models.GroupObservation
+        sys.path.insert(0, str(ROOT.parent))
+        try:
+            packaged = importlib.import_module(f"{ROOT.name}.service.group_observer")
+            self.assertIsNot(packaged.GroupObservation, original)
+            self.assertEqual(packaged.GroupObservation.__name__, "GroupObservation")
+        finally:
+            stale_models.GroupObservation = original
+            sys.path.remove(str(ROOT.parent))
+            for name in list(sys.modules):
+                if name == ROOT.name or name.startswith(f"{ROOT.name}."):
+                    sys.modules.pop(name, None)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 import json
 from typing import Optional
 
-from core.models import Entity, Relation, RelationEvidence, utc_now
-from storage.database import SQLiteDB
+if __package__ and "." in __package__:
+    from ..core.models import Entity, Relation, RelationEvidence, utc_now
+    from .database import SQLiteDB
+else:
+    from core.models import Entity, Relation, RelationEvidence, utc_now
+    from storage.database import SQLiteDB
 
 
 class GraphRepository:
