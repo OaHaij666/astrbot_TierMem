@@ -1,6 +1,6 @@
 name: astrbot_TierMem
 display_name: TierMem
 desc: 基于惰性衰减的多层原子记忆与用户关系知识图谱。
-version: v3.0.0
+version: v2.0.0
 author: OaHaij666
 repo: https://github.com/OaHaij666/astrbot_TierMem

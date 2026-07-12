@@ -53,7 +53,7 @@ from utils.subject import (
 )
 
 
-@register("astrbot_TierMem", "TierMem", "原子记忆 + 关系知识图谱", "3.0.0")
+@register("astrbot_TierMem", "TierMem", "原子记忆 + 关系知识图谱", "2.0.0")
 class TierMemPlugin(Star):
     _NICKNAME_CACHE_MAX = 2000
 
@@ -97,7 +97,7 @@ class TierMemPlugin(Star):
         self._initialized = True
         if self.config.enable_auto_summary and self.config.fifo_max_wait_minutes > 0:
             self._fifo_watchdog_task = asyncio.create_task(self._fifo_watchdog())
-        logger.info("TierMem v3 初始化完成：原子记忆 + 知识图谱 + 惰性衰减")
+        logger.info("TierMem v2 初始化完成：原子记忆 + 知识图谱 + 惰性衰减")
 
     def _wire_services(self):
         self.mem_repo = MemoryRepository(self.db)
