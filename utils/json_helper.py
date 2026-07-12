@@ -49,6 +49,7 @@ def safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     # 尝试 json_repair
     try:
         import json_repair
+
         return json_repair.loads(json_text)
     except Exception:
         pass

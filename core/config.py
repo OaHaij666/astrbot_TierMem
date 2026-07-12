@@ -1,59 +1,69 @@
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+
+
+def default_relation_intent_keywords():
+    return {
+        "friend_of": ["朋友", "好友", "友人", "friend"],
+        "colleague_of": ["同事", "同僚", "共事", "colleague"],
+        "participates_in": ["参与", "负责", "开发", "项目", "participate"],
+        "member_of": ["成员", "加入", "属于", "组织", "member"],
+        "likes": ["喜欢", "爱好", "感兴趣", "like"],
+        "family_of": ["家人", "亲属", "父亲", "母亲", "兄弟", "姐妹", "family"],
+    }
 
 
 @dataclass
 class PluginConfig:
-    memory_mode: Literal["global", "shared"] = "global"
     fifo_size: int = 10
-    inject_fifo_in_group: bool = True
-    max_memory_per_layer: int = 50
-    fleeting_ttl_rounds: int = 3
+    fifo_max_wait_minutes: float = 30.0
+    max_memories_per_user: int = 200
+    max_injected_memories: int = 24
+    max_injected_relations: int = 12
+    atom_fts_candidate_limit: int = 40
+    atom_like_candidate_limit: int = 24
+    atom_background_limit: int = 4
+    atom_query_term_limit: int = 24
+    graph_recall_max_hops: int = 2
+    graph_alias_min_length: int = 2
+    graph_max_matched_entities: int = 6
+    graph_entity_scan_limit: int = 5000
+    relation_intent_keywords: dict = field(
+        default_factory=default_relation_intent_keywords
+    )
     max_concurrent_summaries: int = 2
 
-    # LLM Provider 配置
     summary_provider_id: str = ""
     summary_system_prompt: str = ""
 
-    # 总结提示词模板（留空则使用默认提示词）
-    summary_search_replace_prompt: str = ""
-    summary_full_replace_prompt: str = ""
-
-    # 注入控制
     inject_memory_in_private: bool = True
-    inject_layers_in_group: Literal["important_only", "important_general", "all"] = "important_only"
-    active_user_inject_count: int = 4
-    active_user_inject_layers: Literal["important_only", "important_general", "all"] = "important_general"
+    inject_memory_in_group: bool = True
+    inject_fifo_in_group: bool = True
 
-    # 溢出处理
-    memory_overflow_policy: Literal["evict", "condense"] = "evict"
-
-    # 功能开关
     enable_auto_summary: bool = True
     enable_manual_summary: bool = True
     enable_llm_tools: bool = True
     tool_caution_in_prompt: bool = True
 
+    # 各层默认半衰期（天）。core 为 0，表示不随时间自动衰减。
+    core_half_life_days: float = 0.0
+    semantic_half_life_days: float = 180.0
+    episodic_half_life_days: float = 45.0
+    working_half_life_days: float = 7.0
+    relation_half_life_days: float = 180.0
+    retrieval_min_strength: float = 0.08
+
     @classmethod
     def from_astrbot_config(cls, config: dict) -> "PluginConfig":
-        return cls(
-            memory_mode=config.get("memory_mode", "global"),
-            fifo_size=config.get("fifo_size", 10),
-            inject_fifo_in_group=config.get("inject_fifo_in_group", True),
-            max_memory_per_layer=config.get("max_memory_per_layer", 50),
-            fleeting_ttl_rounds=config.get("fleeting_ttl_rounds", 3),
-            max_concurrent_summaries=config.get("max_concurrent_summaries", 2),
-            summary_provider_id=config.get("summary_provider_id", ""),
-            summary_system_prompt=config.get("summary_system_prompt", ""),
-            summary_search_replace_prompt=config.get("summary_search_replace_prompt", ""),
-            summary_full_replace_prompt=config.get("summary_full_replace_prompt", ""),
-            inject_memory_in_private=config.get("inject_memory_in_private", True),
-            inject_layers_in_group=config.get("inject_layers_in_group", "important_only"),
-            active_user_inject_count=config.get("active_user_inject_count", 4),
-            active_user_inject_layers=config.get("active_user_inject_layers", "important_general"),
-            memory_overflow_policy=config.get("memory_overflow_policy", "evict"),
-            enable_auto_summary=config.get("enable_auto_summary", True),
-            enable_manual_summary=config.get("enable_manual_summary", True),
-            enable_llm_tools=config.get("enable_llm_tools", True),
-            tool_caution_in_prompt=config.get("tool_caution_in_prompt", True),
-        )
+        values = {}
+        for name in cls.__dataclass_fields__:
+            if name in config:
+                values[name] = config[name]
+        return cls(**values)
+
+    def half_life_for_layer(self, layer: str) -> float:
+        return {
+            "core": self.core_half_life_days,
+            "semantic": self.semantic_half_life_days,
+            "episodic": self.episodic_half_life_days,
+            "working": self.working_half_life_days,
+        }.get(layer, self.semantic_half_life_days)

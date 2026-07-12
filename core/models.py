@@ -1,183 +1,266 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import exp, log
 from typing import Any, Dict, List, Literal, Optional
-import uuid
 
 
-def _utc_now() -> str:
+MemoryLayer = Literal["core", "semantic", "episodic", "working"]
+MemoryCategory = Literal["profile", "preference", "task", "fact", "event", "relation"]
+EntityType = Literal["user", "group", "project", "organization", "topic", "other"]
+
+
+def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _generate_id(prefix: str = "mem") -> str:
-    return f"{prefix}-{int(datetime.now(timezone.utc).timestamp())}-{uuid.uuid4().hex[:6]}"
+def parse_time(value: Optional[str]) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def decay_rate_from_half_life(half_life_days: float) -> float:
+    if half_life_days <= 0:
+        return 0.0
+    return log(2.0) / half_life_days
+
+
+def decayed_strength(
+    strength: float,
+    decay_rate: float,
+    last_confirmed_at: str,
+    stability: float = 0.5,
+    now: Optional[datetime] = None,
+) -> float:
+    now = now or datetime.now(timezone.utc)
+    age_days = max(0.0, (now - parse_time(last_confirmed_at)).total_seconds() / 86400.0)
+    # 稳定性越高，实际衰减越慢；0.5 保持配置给出的标准速率。
+    stability_factor = max(0.1, 1.5 - max(0.0, min(stability, 1.0)))
+    return max(0.0, min(1.0, strength * exp(-decay_rate * stability_factor * age_days)))
 
 
 @dataclass
 class MemoryEntry:
     memory_id: str
+    owner_user_id: str
     content: str
-    layer: Literal["important", "general", "fleeting"]
-    category: Literal["profile", "preference", "task", "fact", "event"]
+    layer: MemoryLayer = "semantic"
+    category: MemoryCategory = "fact"
     importance: int = 3
-    subject_id: str = ""
-    created_at: str = field(default_factory=_utc_now)
-    updated_at: str = field(default_factory=_utc_now)
+    confidence: float = 0.7
+    strength: float = 0.7
+    stability: float = 0.5
+    decay_rate: float = 0.0
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    last_accessed_at: Optional[str] = None
+    last_confirmed_at: str = field(default_factory=utc_now)
+    confirmation_count: int = 1
     expires_at: Optional[str] = None
-    source: Literal["auto_summary", "manual", "tool_call"] = "auto_summary"
-    confidence: int = 3
+    source: str = "auto_summary"
+    source_turn_id: Optional[str] = None
+    visibility_scope: str = "private"
+    context_id: Optional[str] = None
+    status: str = "active"
+
+    # Compatibility alias for older call sites while the plugin API remains stable.
+    @property
+    def subject_id(self) -> str:
+        return self.owner_user_id
+
+    @subject_id.setter
+    def subject_id(self, value: str) -> None:
+        self.owner_user_id = value
+
+    def effective_strength(self, now: Optional[datetime] = None) -> float:
+        if self.expires_at and parse_time(self.expires_at) <= (
+            now or datetime.now(timezone.utc)
+        ):
+            return 0.0
+        return decayed_strength(
+            self.strength, self.decay_rate, self.last_confirmed_at, self.stability, now
+        )
+
+    def retrieval_score(self, now: Optional[datetime] = None) -> float:
+        return self.effective_strength(now) * (self.importance / 5.0) * self.confidence
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "memory_id": self.memory_id,
-            "content": self.content,
-            "layer": self.layer,
-            "category": self.category,
-            "importance": self.importance,
-            "subject_id": self.subject_id,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "expires_at": self.expires_at or "",
-            "source": self.source,
-            "confidence": self.confidence,
-        }
+        return self.__dict__.copy()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MemoryEntry":
-        return cls(
-            memory_id=data.get("memory_id", _generate_id()),
-            content=data.get("content", ""),
-            layer=data.get("layer", "general"),
-            category=data.get("category", "fact"),
-            importance=data.get("importance", 3),
-            subject_id=data.get("subject_id", ""),
-            created_at=data.get("created_at", _utc_now()),
-            updated_at=data.get("updated_at", _utc_now()),
-            expires_at=data.get("expires_at") or None,
-            source=data.get("source", "auto_summary"),
-            confidence=data.get("confidence", 3),
-        )
+        allowed = cls.__dataclass_fields__.keys()
+        values = {k: v for k, v in data.items() if k in allowed}
+        values.setdefault("memory_id", "")
+        values.setdefault("owner_user_id", data.get("subject_id", ""))
+        values.setdefault("content", "")
+        return cls(**values)
 
 
 @dataclass
 class MemoryState:
-    important: List[MemoryEntry] = field(default_factory=list)
-    general: List[MemoryEntry] = field(default_factory=list)
-    fleeting: List[MemoryEntry] = field(default_factory=list)
-    version: int = 1
-    last_summary_at: Optional[str] = None
+    core: List[MemoryEntry] = field(default_factory=list)
+    semantic: List[MemoryEntry] = field(default_factory=list)
+    episodic: List[MemoryEntry] = field(default_factory=list)
+    working: List[MemoryEntry] = field(default_factory=list)
+
+    # Compatibility views used by a few external integrations.
+    @property
+    def important(self) -> List[MemoryEntry]:
+        return self.core
+
+    @property
+    def general(self) -> List[MemoryEntry]:
+        return self.semantic
+
+    @property
+    def fleeting(self) -> List[MemoryEntry]:
+        return self.working
+
+    def all_entries(self) -> List[MemoryEntry]:
+        return self.core + self.semantic + self.episodic + self.working
+
+    def get_layer(self, layer: str) -> List[MemoryEntry]:
+        return list(getattr(self, layer, []))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "important": [e.to_dict() for e in self.important],
-            "general": [e.to_dict() for e in self.general],
-            "fleeting": [e.to_dict() for e in self.fleeting],
-            "version": self.version,
-            "last_summary_at": self.last_summary_at or "",
+            layer: [e.to_dict() for e in self.get_layer(layer)]
+            for layer in ("core", "semantic", "episodic", "working")
         }
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MemoryState":
-        return cls(
-            important=[MemoryEntry.from_dict(e) for e in data.get("important", [])],
-            general=[MemoryEntry.from_dict(e) for e in data.get("general", [])],
-            fleeting=[MemoryEntry.from_dict(e) for e in data.get("fleeting", [])],
-            version=data.get("version", 1),
-            last_summary_at=data.get("last_summary_at") or None,
+
+@dataclass
+class Entity:
+    entity_id: str
+    entity_type: EntityType
+    name: str
+    aliases: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass
+class Relation:
+    relation_id: str
+    source_entity_id: str
+    relation_type: str
+    target_entity_id: str
+    confidence: float = 0.7
+    strength: float = 0.7
+    stability: float = 0.5
+    decay_rate: float = 0.0
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    last_confirmed_at: str = field(default_factory=utc_now)
+    confirmation_count: int = 1
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    status: str = "active"
+    visibility_scope: str = "private"
+    context_id: Optional[str] = None
+    owner_user_id: str = ""
+
+    def effective_strength(self, now: Optional[datetime] = None) -> float:
+        if self.valid_until and parse_time(self.valid_until) <= (
+            now or datetime.now(timezone.utc)
+        ):
+            return 0.0
+        return decayed_strength(
+            self.strength, self.decay_rate, self.last_confirmed_at, self.stability, now
         )
 
-    def all_entries(self) -> List[MemoryEntry]:
-        return self.important + self.general + self.fleeting
 
-    def get_layer(self, layer: str) -> List[MemoryEntry]:
-        if layer == "important":
-            return self.important
-        elif layer == "general":
-            return self.general
-        elif layer == "fleeting":
-            return self.fleeting
-        return []
+@dataclass
+class RelationEvidence:
+    evidence_id: str
+    relation_id: str
+    excerpt: str
+    speaker_user_id: str = ""
+    turn_id: Optional[str] = None
+    created_at: str = field(default_factory=utc_now)
+    memory_id: Optional[str] = None
+    polarity: str = "support"
+    evidence_weight: float = 1.0
 
 
 @dataclass
 class ConversationTurn:
     turn_id: str
+    user_id: str
     user_message: str
     assistant_message: str
     timestamp: str
+    context_id: Optional[str] = None
     group_id: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "turn_id": self.turn_id,
-            "user_message": self.user_message,
-            "assistant_message": self.assistant_message,
-            "timestamp": self.timestamp,
-            "group_id": self.group_id or "",
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ConversationTurn":
-        return cls(
-            turn_id=data.get("turn_id", _generate_id("turn")),
-            user_message=data.get("user_message", ""),
-            assistant_message=data.get("assistant_message", ""),
-            timestamp=data.get("timestamp", _utc_now()),
-            group_id=data.get("group_id") or None,
-        )
 
     def to_prompt_text(self) -> str:
         return (
-            f"[User]: {self.user_message}\n"
+            f"[Context {self.context_id or 'unknown'}] [User {self.user_id}]: {self.user_message}\n"
             f"[Assistant]: {self.assistant_message}\n"
         )
 
 
 @dataclass
-class SummaryOperation:
-    action: Literal["add", "update", "delete", "keep"]
-    layer: Optional[Literal["important", "general", "fleeting"]] = None
+class MemoryOperation:
+    action: str
     memory_id: Optional[str] = None
     content: Optional[str] = None
+    layer: Optional[str] = None
     category: Optional[str] = None
     importance: Optional[int] = None
-    reason: Optional[str] = None
+    confidence: Optional[float] = None
+    stability: Optional[float] = None
+    visibility_scope: Optional[str] = None
+    entity_ids: List[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SummaryOperation":
-        return cls(
-            action=data.get("action", "keep"),
-            layer=data.get("layer"),
-            memory_id=data.get("memory_id"),
-            content=data.get("content"),
-            category=data.get("category"),
-            importance=data.get("importance"),
-            reason=data.get("reason"),
-        )
+    def from_dict(cls, data: Dict[str, Any]) -> "MemoryOperation":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class RelationOperation:
+    action: str
+    relation_id: Optional[str] = None
+    source_entity_id: Optional[str] = None
+    source_entity_type: str = "user"
+    source_name: Optional[str] = None
+    source_aliases: List[str] = field(default_factory=list)
+    relation_type: Optional[str] = None
+    target_entity_id: Optional[str] = None
+    target_entity_type: str = "user"
+    target_name: Optional[str] = None
+    target_aliases: List[str] = field(default_factory=list)
+    confidence: Optional[float] = None
+    stability: Optional[float] = None
+    visibility_scope: Optional[str] = None
+    evidence: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RelationOperation":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
 class SummaryResult:
-    mode: Literal["search_replace", "full_replace"]
     summary: str = ""
-    operations: List[SummaryOperation] = field(default_factory=list)
-    full_state: Optional[MemoryState] = None
-    cross_user_operations: Dict[str, List[SummaryOperation]] = field(default_factory=dict)
+    memory_operations: List[MemoryOperation] = field(default_factory=list)
+    relation_operations: List[RelationOperation] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], mode: str) -> "SummaryResult":
-        ops = [SummaryOperation.from_dict(o) for o in data.get("operations", [])]
-        full_state = None
-        if mode == "full_replace" and "full_state" in data:
-            full_state = MemoryState.from_dict(data["full_state"])
-        cross_ops: Dict[str, List[SummaryOperation]] = {}
-        raw_cross = data.get("cross_user_operations", {})
-        if isinstance(raw_cross, dict):
-            for uid, op_list in raw_cross.items():
-                cross_ops[uid] = [SummaryOperation.from_dict(o) for o in op_list]
+    def from_dict(cls, data: Dict[str, Any]) -> "SummaryResult":
         return cls(
-            mode=mode,
             summary=data.get("summary", ""),
-            operations=ops,
-            full_state=full_state,
-            cross_user_operations=cross_ops,
+            memory_operations=[
+                MemoryOperation.from_dict(x) for x in data.get("memory_operations", [])
+            ],
+            relation_operations=[
+                RelationOperation.from_dict(x)
+                for x in data.get("relation_operations", [])
+            ],
         )

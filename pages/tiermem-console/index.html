@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TierMem Console</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <strong>TierMem</strong><span>Memory intelligence console</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <span class="status"
+            ><i aria-hidden="true"></i
+            ><span id="connection-label">正在连接</span></span
+          >
+          <button class="button secondary" id="refresh-button" type="button">
+            刷新数据
+          </button>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="TierMem 控制台导航">
+        <button
+          class="tab active"
+          type="button"
+          data-view="overview"
+          aria-current="page"
+        >
+          总览
+        </button>
+        <button class="tab" type="button" data-view="graph">关系图谱</button>
+        <button class="tab" type="button" data-view="memories">原子记忆</button>
+        <button class="tab" type="button" data-view="recall">召回实验室</button>
+        <button class="tab" type="button" data-view="settings">运行配置</button>
+      </nav>
+
+      <main id="main">
+        <section
+          class="view active"
+          id="view-overview"
+          aria-labelledby="overview-title"
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SYSTEM PULSE</p>
+              <h1 id="overview-title">记忆系统总览</h1>
+            </div>
+            <p>观察原子记忆、图谱规模与待总结对话。</p>
+          </div>
+          <div class="metrics" id="metrics" aria-live="polite"></div>
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">MEMORY LAYERS</p>
+                  <h2>记忆层分布</h2>
+                </div>
+              </div>
+              <div id="layer-bars" class="layer-bars"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">RECALL PIPELINE</p>
+                  <h2>当前召回策略</h2>
+                </div>
+              </div>
+              <ol class="pipeline">
+                <li><span>01</span>FTS5 trigram 检索原子</li>
+                <li><span>02</span>LIKE / 重要原子降级</li>
+                <li><span>03</span>原子定位实体与证据边</li>
+                <li><span>04</span>精确实体并行匹配</li>
+                <li><span>05</span>一至两跳受约束扩展</li>
+              </ol>
+            </article>
+          </div>
+        </section>
+
+        <section
+          class="view"
+          id="view-graph"
+          aria-labelledby="graph-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">KNOWLEDGE GRAPH</p>
+              <h1 id="graph-title">关系图谱</h1>
+            </div>
+            <p>拖动和选择节点，或使用下方关系表精确查看。</p>
+          </div>
+          <div class="toolbar">
+            <label
+              >筛选实体<input
+                id="graph-search"
+                type="search"
+                placeholder="名称、ID 或关系类型"
+            /></label>
+            <label
+              >实体类型<select id="graph-type">
+                <option value="">全部类型</option>
+                <option value="user">用户</option>
+                <option value="group">群聊</option>
+                <option value="project">项目</option>
+                <option value="organization">组织</option>
+                <option value="topic">话题</option>
+                <option value="other">其他</option>
+              </select></label
+            >
+          </div>
+          <article class="panel graph-panel">
+            <canvas
+              id="graph-canvas"
+              role="img"
+              aria-label="TierMem 实体关系网络图"
+            ></canvas>
+            <div class="graph-empty" id="graph-empty" hidden>
+              暂无符合条件的关系
+            </div>
+            <div class="node-detail" id="node-detail" aria-live="polite">
+              选择一个节点查看详情
+            </div>
+          </article>
+          <article class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">ACCESSIBLE VIEW</p>
+                <h2>关系明细</h2>
+              </div>
+              <span id="edge-count" class="count"></span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>源实体</th>
+                    <th>关系</th>
+                    <th>目标实体</th>
+                    <th>有效强度</th>
+                    <th>置信度</th>
+                    <th>范围</th>
+                  </tr>
+                </thead>
+                <tbody id="edge-table"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section
+          class="view"
+          id="view-memories"
+          aria-labelledby="memories-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ATOMIC MEMORY</p>
+              <h1 id="memories-title">原子记忆</h1>
+            </div>
+            <p>查看每条记忆当前衰减后的有效强度。</p>
+          </div>
+          <div class="toolbar">
+            <label
+              >用户 ID<input
+                id="memory-user"
+                type="search"
+                placeholder="留空查看全部" /></label
+            ><label
+              >记忆层<select id="memory-layer">
+                <option value="">全部层级</option>
+                <option value="core">Core</option>
+                <option value="semantic">Semantic</option>
+                <option value="episodic">Episodic</option>
+                <option value="working">Working</option>
+              </select></label
+            ><button
+              class="button secondary align-end"
+              id="memory-filter"
+              type="button"
+            >
+              应用筛选
+            </button>
+          </div>
+          <article class="panel table-panel">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>层级</th>
+                    <th>原子内容</th>
+                    <th>重要度</th>
+                    <th>有效强度</th>
+                    <th>置信度</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody id="memory-table"></tbody>
+              </table>
+            </div>
+            <p class="empty-message" id="memory-empty" hidden>
+              暂无符合条件的原子记忆。
+            </p>
+          </article>
+        </section>
+
+        <section
+          class="view"
+          id="view-recall"
+          aria-labelledby="recall-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">RECALL LAB</p>
+              <h1 id="recall-title">召回实验室</h1>
+            </div>
+            <p>不调用 embedding，逐层展示原子检索、图入口和候选关系评分。</p>
+          </div>
+          <div class="two-column recall-layout">
+            <form class="panel form-panel" id="recall-form">
+              <label
+                >当前用户 ID<input
+                  name="user_id"
+                  required
+                  placeholder="例如 123456" /></label
+              ><label
+                >会话上下文<input
+                  name="context_id"
+                  required
+                  placeholder="private:123456 或 group:789" /></label
+              ><label
+                >当前消息<textarea
+                  name="message"
+                  required
+                  rows="5"
+                  placeholder="例如：小王上次说的 TierMem 项目怎么样了？"
+                ></textarea></label
+              ><button class="button primary" type="submit">运行召回</button>
+            </form>
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">EXPLAINABILITY</p>
+                  <h2>召回解释</h2>
+                </div>
+              </div>
+              <div id="recall-output" class="recall-output">
+                <p class="muted">
+                  提交一条消息后，这里会展示检索模式、原子评分、实体映射、证据边和图扩展。
+                </p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section
+          class="view"
+          id="view-settings"
+          aria-labelledby="settings-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">RUNTIME SETTINGS</p>
+              <h1 id="settings-title">运行配置</h1>
+            </div>
+            <p>保存后立即更新当前插件实例，并写回 AstrBot 插件配置。</p>
+          </div>
+          <form id="settings-form" class="settings-form">
+            <fieldset class="panel">
+              <legend>FIFO 与容量</legend>
+              <div class="field-grid" id="settings-queue"></div>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>召回策略</legend>
+              <div class="field-grid" id="settings-recall"></div>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>衰减半衰期</legend>
+              <div class="field-grid" id="settings-decay"></div>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>总结模型</legend>
+              <div class="field-grid">
+                <label
+                  >最大并发总结<input
+                    type="number"
+                    name="max_concurrent_summaries"
+                    min="1"
+                    step="1"
+                /></label>
+                <label
+                  >总结 Provider ID<input
+                    name="summary_provider_id"
+                    placeholder="留空使用主模型"
+                /></label>
+              </div>
+              <label
+                >额外系统提示词<textarea
+                  name="summary_system_prompt"
+                  rows="5"
+                  placeholder="追加给记忆与关系抽取器"
+                ></textarea>
+              </label>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>功能开关</legend>
+              <div class="switch-grid" id="settings-switches"></div>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>关系意图词典</legend>
+              <label
+                >JSON 映射<textarea
+                  id="intent-keywords"
+                  rows="12"
+                  spellcheck="false"
+                ></textarea
+                ><span class="helper"
+                  >键是关系类型，值是触发召回的关键词数组。修改后会校验
+                  JSON。</span
+                ></label
+              >
+            </fieldset>
+            <div class="form-actions">
+              <span id="settings-state" role="status"></span
+              ><button class="button primary" type="submit">保存配置</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

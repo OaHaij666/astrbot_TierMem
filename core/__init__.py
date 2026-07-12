@@ -1,15 +1,25 @@
-from .models import MemoryEntry, MemoryState, ConversationTurn, SummaryOperation, SummaryResult
 from .config import PluginConfig
-from .exceptions import MemoryError, ValidationError, MigrationError
+from .models import (
+    ConversationTurn,
+    Entity,
+    MemoryEntry,
+    MemoryOperation,
+    MemoryState,
+    Relation,
+    RelationEvidence,
+    RelationOperation,
+    SummaryResult,
+)
 
 __all__ = [
+    "PluginConfig",
     "MemoryEntry",
     "MemoryState",
+    "Entity",
+    "Relation",
+    "RelationEvidence",
     "ConversationTurn",
-    "SummaryOperation",
+    "MemoryOperation",
+    "RelationOperation",
     "SummaryResult",
-    "PluginConfig",
-    "MemoryError",
-    "ValidationError",
-    "MigrationError",
 ]

@@ -1,472 +1,831 @@
-
+# ruff: noqa: E402
 import asyncio
 import sys
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-# 确保插件内部包可被导入
 _plugin_dir = Path(__file__).parent.resolve()
 if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
 
-from astrbot.api.provider import ProviderRequest, LLMResponse
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from core.config import PluginConfig
-from core.models import ConversationTurn, MemoryEntry
-from core.exceptions import SummaryError
-
-from storage.database import SQLiteDB
-from storage.memory_repo import MemoryRepository
-from storage.fifo_repo import FifoRepository
-from storage.migration import ModeMigration
-
-from service.summarizer import Summarizer
-from service.injector import Injector
-from service.backup import BackupService
-
-from api.tools import MemoryTools
 from api.commands import CommandHandler
+from api.tools import MemoryTools
+from core.config import PluginConfig
+from core.exceptions import SummaryError
+from core.models import (
+    ConversationTurn,
+    Entity,
+    MemoryEntry,
+    Relation,
+    RelationEvidence,
+    decay_rate_from_half_life,
+    utc_now,
+)
+from service.backup import BackupService
+from service.graph_retriever import GraphRetriever
+from service.injector import Injector
+from service.summarizer import Summarizer
+from storage.database import SQLiteDB
+from storage.fifo_repo import FifoRepository
+from storage.graph_repo import GraphRepository
+from storage.memory_repo import MemoryRepository
+from utils.id_gen import (
+    generate_evidence_id,
+    generate_memory_id,
+    generate_relation_id,
+    generate_turn_id,
+)
+from utils.subject import (
+    detect_scene,
+    extract_context_id,
+    extract_group_id,
+    extract_user_id,
+)
 
-from utils.id_gen import generate_turn_id
-from utils.subject import extract_subject_id, detect_scene, build_cross_subject_id
 
-
-from collections import OrderedDict
-
-@register("astrbot_TierMem", "TierMem", "主动总结 + 工具辅助的双轨记忆系统", "1.0.0")
-class SmartMemoryPlugin(Star):
-    _SUMMARY_MAX_CONSECUTIVE_FAILURES = 3
+@register("astrbot_TierMem", "TierMem", "原子记忆 + 关系知识图谱", "3.0.0")
+class TierMemPlugin(Star):
     _NICKNAME_CACHE_MAX = 2000
-    _LOCK_CLEANUP_INTERVAL = 100
 
     def __init__(self, context: Context, config: Dict[str, Any]):
         super().__init__(context)
         self.context = context
-
-        # 防御性处理：确保 config 是字典
-        if not isinstance(config, dict):
-            config = {}
-        self.config = PluginConfig.from_astrbot_config(config)
-
-        # 数据目录
-        self.data_dir = Path(get_astrbot_data_path()) / "memory"
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-
-        # 数据库
-        self.db_path = self.data_dir / "memory.db"
-        self.db: SQLiteDB = None
-        self.mem_repo: MemoryRepository = None
-        self.fifo_repo: FifoRepository = None
-
-        # 服务
-        self.summarizer: Summarizer = None
-        self.injector: Injector = None
-        self.backup_service: BackupService = None
-        self.cmd_handler: CommandHandler = None
-        self.memory_tools: MemoryTools = None
-
-        # 初始化标记
+        self._raw_config = config if isinstance(config, dict) else {}
+        self.config = PluginConfig.from_astrbot_config(self._raw_config)
+        self.data_dir = Path(get_astrbot_data_path()) / "tiermem"
+        self.db_path = self.data_dir / "tiermem.db"
+        self.db = None
+        self.mem_repo = None
+        self.graph_repo = None
+        self.fifo_repo = None
+        self.summarizer = None
+        self.injector = None
+        self.backup_service = None
+        self.commands = None
+        self.memory_tools = None
+        self.graph_retriever = None
         self._initialized = False
-
-        # 并发控制（延迟初始化，避免事件循环问题）
         self._summary_semaphore = None
-
-        # 记忆修改互斥锁：每个 subject_id 对应一个 asyncio.Lock
-        self._memory_locks: Dict[str, asyncio.Lock] = {}
-
-        # 昵称缓存：uid -> nickname，用于注入时替换 {{uid:xxx}}
-        self._nickname_cache: OrderedDict[str, str] = OrderedDict()
-
-        # 总结连续失败计数器：subject_id -> count，防止死循环重试
-        self._summary_failure_count: Dict[str, int] = {}
+        self._user_locks = {}
+        self._maintenance_lock = asyncio.Lock()
+        self._pending = defaultdict(deque)
+        self._nickname_cache = OrderedDict()
+        self._scheduled_summaries = set()
+        self._fifo_watchdog_task = None
+        self._register_web_apis()
 
     async def initialize(self):
-        """插件初始化"""
         if self._initialized:
             return
-
-        # 连接数据库
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db = await SQLiteDB(self.db_path).connect()
         await self.db.init_tables()
+        self._wire_services()
+        self._summary_semaphore = asyncio.Semaphore(
+            max(1, int(self.config.max_concurrent_summaries))
+        )
+        self._initialized = True
+        if self.config.enable_auto_summary and self.config.fifo_max_wait_minutes > 0:
+            self._fifo_watchdog_task = asyncio.create_task(self._fifo_watchdog())
+        logger.info("TierMem v3 初始化完成：原子记忆 + 知识图谱 + 惰性衰减")
 
-        # Repository
-        self.mem_repo = MemoryRepository(self.db.conn)
-        self.fifo_repo = FifoRepository(self.db.conn)
-
-        # 模式迁移检测
-        migration = ModeMigration(self.db)
-        await migration.check_and_run(self.config.memory_mode)
-
-        # 服务初始化
+    def _wire_services(self):
+        self.mem_repo = MemoryRepository(self.db)
+        self.graph_repo = GraphRepository(self.db)
+        self.fifo_repo = FifoRepository(self.db)
         self.summarizer = Summarizer(self.config, self.context)
         self.injector = Injector(self.config)
         self.backup_service = BackupService(self.db, self.data_dir / "backup")
-        self.cmd_handler = CommandHandler(
-            self.config, self.mem_repo, self.fifo_repo, self.backup_service
+        self.commands = CommandHandler(
+            self.config, self.mem_repo, self.fifo_repo, self.graph_repo
         )
         self.memory_tools = MemoryTools(self.config, self.mem_repo)
+        self.graph_retriever = GraphRetriever(
+            self.config, self.graph_repo, self.mem_repo
+        )
 
-        # 初始化信号量（使用 getattr 防止 schema 解析失败导致字段缺失）
-        if self._summary_semaphore is None:
-            max_concurrent = getattr(self.config, "max_concurrent_summaries", 2)
-            self._summary_semaphore = asyncio.Semaphore(max_concurrent)
-
-        self._initialized = True
-        logger.info("SmartMemory 插件初始化完成")
-
-    # ------------------------------------------------------------------
-    # 事件监听
-    # ------------------------------------------------------------------
-
-    # 临时存储用户消息，用于在 on_llm_response 中配对
-    _pending_user_messages: dict = {}
+    def _register_web_apis(self):
+        if not hasattr(self.context, "register_web_api"):
+            return
+        routes = (
+            ("stats", self.page_stats, ["GET"], "TierMem overview"),
+            ("graph", self.page_graph, ["GET"], "TierMem graph"),
+            ("memories", self.page_memories, ["GET"], "TierMem memories"),
+            ("recall", self.page_recall, ["POST"], "TierMem recall lab"),
+            ("settings", self.page_settings, ["GET", "POST"], "TierMem settings"),
+        )
+        for suffix, handler, methods, desc in routes:
+            self.context.register_web_api(
+                f"/astrbot_TierMem/{suffix}", handler, methods, desc
+            )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """在 LLM 请求前注入记忆，并记录用户消息"""
         if not self._initialized:
             await self.initialize()
+        user_id, context_id, scene = (
+            extract_user_id(event),
+            extract_context_id(event),
+            detect_scene(event),
+        )
+        user_text = event.message_str or ""
+        nickname = self._remember_nickname(event, user_id)
+        await self.graph_repo.ensure_user(user_id, nickname)
 
-        subject_id = extract_subject_id(event, self.config.memory_mode)
-        scene = detect_scene(event)
-
-        self._update_nickname_cache(event)
-
-        self.injector.update_nickname_cache(self._nickname_cache)
-
-        state = await self.mem_repo.get_state(subject_id)
-
-        # 群聊时读取 FIFO
-        fifo_turns = None
-        if scene == "group" and self.config.inject_fifo_in_group:
-            fifo_turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
-
-        # 构建注入文本
-        mem_prompt = self.injector.build_memory_prompt(state, subject_id, scene, fifo_turns)
-
-        # 群聊时注入活跃用户印象
-        if scene == "group" and self.config.active_user_inject_count > 0:
-            active_section = await self._build_active_users_section(subject_id)
-            if active_section:
-                mem_prompt += "\n" + active_section
-
-        # 追加到系统提示词
-        req.system_prompt = (req.system_prompt or "") + mem_prompt
-
-        # 工具使用警告
-        if self.config.enable_llm_tools and self.config.tool_caution_in_prompt:
-            req.system_prompt += (
-                "\n[NOTE] 你拥有 memory_add / memory_update / memory_delete 工具，"
-                "但请谨慎使用。记忆系统会自动总结对话，你只需在需要即时记录关键信息时调用工具。\n"
+        should_inject = (
+            scene == "private" and self.config.inject_memory_in_private
+        ) or (scene == "group" and self.config.inject_memory_in_group)
+        if should_inject:
+            recall = await self.graph_retriever.recall(user_id, user_text, context_id)
+            memories = recall.memories
+            relations = recall.relations
+            entities = await self._load_relation_entities(relations)
+            fifo = None
+            if scene == "group" and self.config.inject_fifo_in_group:
+                fifo = await self.fifo_repo.get_turns(
+                    user_id, self.config.fifo_size, context_id
+                )
+            self.injector.update_nickname_cache(self._nickname_cache)
+            req.system_prompt = (req.system_prompt or "") + self.injector.build_prompt(
+                user_id, scene, memories, relations, entities, fifo
             )
 
-        # 记录用户消息到 pending，等待 on_llm_response 配对
-        user_text = event.message_str or ""
+        if self.config.enable_llm_tools and self.config.tool_caution_in_prompt:
+            req.system_prompt = (req.system_prompt or "") + (
+                "\n[NOTE] memory_add/update/delete 仅管理当前用户的原子记忆；"
+                "用户间关系由知识图谱总结器维护。\n"
+            )
         if user_text:
+            pending_id = generate_turn_id()
             origin = event.unified_msg_origin
-            self._pending_user_messages[origin] = {
-                "subject_id": subject_id,
-                "user_message": user_text,
-                "timestamp": getattr(event, "timestamp", None) or "",
-            }
-            asyncio.create_task(self._cleanup_pending_after(origin, 120))
+            self._pending[origin].append(
+                {
+                    "pending_id": pending_id,
+                    "user_id": user_id,
+                    "context_id": context_id,
+                    "group_id": extract_group_id(event),
+                    "user_message": user_text,
+                    # 使用统一 ISO UTC 时间，保证数据库过期扫描可以可靠比较。
+                    "timestamp": utc_now(),
+                }
+            )
+            asyncio.create_task(self._expire_pending(origin, pending_id))
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """LLM 响应后，配对用户消息和助手回复，写入 FIFO"""
         if not self._initialized:
             return
-
-        pending = self._pending_user_messages.pop(event.unified_msg_origin, None)
-        if not pending:
+        queue = self._pending.get(event.unified_msg_origin)
+        if not queue:
             return
-
-        assistant_text = resp.completion_text or ""
-
+        pending = queue.popleft()
+        if not queue:
+            self._pending.pop(event.unified_msg_origin, None)
         turn = ConversationTurn(
             turn_id=generate_turn_id(),
+            user_id=pending["user_id"],
             user_message=pending["user_message"],
-            assistant_message=assistant_text,
+            assistant_message=resp.completion_text or "",
             timestamp=pending["timestamp"],
-            group_id=pending["subject_id"].split("#")[1] if "#" in pending["subject_id"] else None,
+            context_id=pending["context_id"],
+            group_id=pending["group_id"],
         )
-
         try:
-            await self.fifo_repo.append_turn(pending["subject_id"], turn)
+            await self.fifo_repo.append_turn(pending["user_id"], turn)
+            if (
+                self.config.enable_auto_summary
+                and await self.fifo_repo.count(
+                    pending["user_id"], pending["context_id"]
+                )
+                >= self.config.fifo_size
+            ):
+                self._schedule_summary(pending["user_id"], pending["context_id"])
+        except Exception as exc:
+            logger.error(f"保存对话失败: {exc}")
 
-            # 检查是否触发总结
-            if self.config.enable_auto_summary:
-                count = await self.fifo_repo.count(pending["subject_id"])
-                if count >= self.config.fifo_size:
-                    # 后台异步总结，不阻塞
-                    asyncio.create_task(self._run_summary(pending["subject_id"]))
-        except Exception as e:
-            logger.error(f"收集对话失败: {e}")
-
-    def _get_memory_lock(self, subject_id: str) -> asyncio.Lock:
-        """获取指定 subject_id 的记忆修改锁"""
-        if subject_id not in self._memory_locks:
-            if len(self._memory_locks) >= self._LOCK_CLEANUP_INTERVAL:
-                for key in list(self._memory_locks.keys()):
-                    lock = self._memory_locks[key]
-                    if not lock.locked():
-                        del self._memory_locks[key]
-            self._memory_locks[subject_id] = asyncio.Lock()
-        return self._memory_locks[subject_id]
-
-    async def _cleanup_pending_after(self, origin: str, delay: int):
-        await asyncio.sleep(delay)
-        self._pending_user_messages.pop(origin, None)
-
-    async def _build_active_users_section(self, current_subject_id: str) -> str:
-        parts = current_subject_id.split("#")
-        current_user = parts[0]
-        group_id = parts[1] if len(parts) > 1 and parts[1] not in ("shared", "private") else None
-        if not group_id:
-            return ""
-
-        active_subjects = await self.fifo_repo.get_active_subjects(
-            group_id, self.config.active_user_inject_count, exclude_user_id=current_user
-        )
-        if not active_subjects:
-            return ""
-
-        layers_config = self.config.active_user_inject_layers
-        users_data = []
-        for subj in active_subjects:
-            uid = subj.split("#")[0]
-            state = await self.mem_repo.get_state(subj)
-            layer_map = {}
-            if layers_config in ("important_only", "important_general", "all"):
-                layer_map["important"] = state.important
-            if layers_config in ("important_general", "all"):
-                layer_map["general"] = state.general
-            if layers_config == "all":
-                layer_map["fleeting"] = state.fleeting
-            has_any = any(entries for entries in layer_map.values())
-            if has_any:
-                users_data.append({
-                    "user_id": uid,
-                    "user_label": f"{{{{uid:{uid}}}}}",
-                    "layers": layer_map,
-                })
-
-        if not users_data:
-            return ""
-        return self.injector.build_active_users_section(users_data)
-
-    async def _run_summary(self, subject_id: str):
-        """后台执行总结，带并发控制和互斥锁"""
-        if self._summary_semaphore is None:
-            max_concurrent = getattr(self.config, "max_concurrent_summaries", 2)
-            self._summary_semaphore = asyncio.Semaphore(max_concurrent)
+    async def _run_summary(self, user_id: str, context_id: str):
+        if not self._initialized:
+            return
         async with self._summary_semaphore:
-            # 获取该 subject 的互斥锁，防止多个总结任务同时修改同一用户记忆
-            lock = self._get_memory_lock(subject_id)
-            async with lock:
+            async with self._user_lock(user_id):
                 try:
+                    turns = await self.fifo_repo.get_turns(
+                        user_id, self.config.fifo_size, context_id
+                    )
+                    if not turns:
+                        return
                     await self.backup_service.create_backup()
                     self.backup_service.cleanup_old_backups(keep=5)
-
-                    # 读取 FIFO
-                    turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
-                    if not turns:
-                        logger.info(f"FIFO 为空，跳过总结: {subject_id}")
-                        return
-
-                    # 调试：打印 FIFO 内容
-                    for i, t in enumerate(turns):
-                        logger.debug(f"[FIFO][{i}] subject={subject_id} user={t.user_message[:50]} assistant={t.assistant_message[:50]}")
-
-                    # 读取当前记忆
-                    state = await self.mem_repo.get_state(subject_id)
-
-                    # 调用总结器（LLM 自行选择 search_replace 或 full_replace）
+                    memories = await self.mem_repo.get_by_user(user_id)
+                    relations = await self.graph_repo.get_neighbors(
+                        f"user:{user_id}", 100, 0.0, context_id
+                    )
                     result = await self.summarizer.summarize(
-                        turns, state, subject_id, self.mem_repo, self.config.memory_mode
+                        turns, memories, relations, user_id, context_id
                     )
-
-                    # 应用结果
-                    await self._apply_summary_result(subject_id, result)
-
-                    # 清空 FIFO
-                    await self.fifo_repo.clear(subject_id)
-
-                    # 更新总结轮次计数，淘汰过期 fleeting
-                    await self._evict_fleeting_by_ttl(subject_id)
-
-                    logger.debug(f"总结完成: {subject_id}, summary: {result.summary[:50]}...")
-
-                    self._summary_failure_count.pop(subject_id, None)
-
-                except SummaryError as e:
-                    self._summary_failure_count[subject_id] = self._summary_failure_count.get(subject_id, 0) + 1
-                    fails = self._summary_failure_count[subject_id]
-                    logger.error(f"总结失败（连续 {fails} 次）: {e}")
-                except Exception as e:
-                    self._summary_failure_count[subject_id] = self._summary_failure_count.get(subject_id, 0) + 1
-                    fails = self._summary_failure_count[subject_id]
-                    logger.error(f"总结异常（连续 {fails} 次）: {e}")
-                else:
-                    return
-
-                if fails >= self._SUMMARY_MAX_CONSECUTIVE_FAILURES:
-                    await self.fifo_repo.clear(subject_id)
-                    self._summary_failure_count[subject_id] = 0
-                    logger.warning(f"总结连续失败 {fails} 次，已清空 FIFO: {subject_id}")
-                else:
-                    await self.fifo_repo.delete_oldest(subject_id, self.config.fifo_size)
-                    logger.debug(f"总结失败，FIFO trim 到最新 {self.config.fifo_size} 轮: {subject_id}")
-
-    async def _evict_fleeting_by_ttl(self, subject_id: str):
-        key = f"fleeting_round_{subject_id}"
-        current = await self._load_meta_int(key, 0)
-        current += 1
-        await self._save_meta(key, str(current))
-
-        ttl = getattr(self.config, "fleeting_ttl_rounds", 3)
-        if current >= ttl:
-            entries = await self.mem_repo.get_by_subject(subject_id, "fleeting")
-            for e in entries:
-                await self.mem_repo.delete(e.memory_id)
-            logger.debug(f"fleeting 记忆已淘汰: {subject_id}（{len(entries)} 条，存活 {current} 轮）")
-            await self._save_meta(key, "0")
-
-    async def _load_meta_int(self, key: str, default: int) -> int:
-        async with self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (key,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        return int(row["value"]) if row and row["value"] else default
-
-    async def _save_meta(self, key: str, value: str) -> None:
-        await self.db.conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-        await self.db.conn.commit()
-
-    async def _apply_summary_result(self, subject_id: str, result):
-        if result.mode == "full_replace" and result.full_state:
-            await self.mem_repo.replace_state(subject_id, result.full_state)
-        elif result.mode == "search_replace":
-            state = await self.mem_repo.get_state(subject_id)
-            index = {e.memory_id: e for e in state.all_entries()}
-
-            for op in result.operations:
-                if op.action == "add":
-                    entry = MemoryEntry(
-                        memory_id=generate_turn_id().replace("turn", "mem"),
-                        content=op.content or "",
-                        layer=op.layer or "general",
-                        category=op.category or "fact",
-                        importance=op.importance or 3,
-                        subject_id=subject_id,
-                        source="auto_summary",
+                    await self._apply_summary(
+                        user_id, context_id, turns[-1], result, memories, relations
                     )
-                    await self.mem_repo.upsert(entry)
-                elif op.action == "update" and op.memory_id:
-                    if op.memory_id in index:
-                        entry = index[op.memory_id]
-                        entry.content = op.content or entry.content
-                        from datetime import datetime, timezone
-                        entry.updated_at = datetime.now(timezone.utc).isoformat()
-                        await self.mem_repo.upsert(entry)
-                elif op.action == "delete" and op.memory_id:
-                    await self.mem_repo.delete(op.memory_id)
+                    await self.fifo_repo.clear(user_id, context_id)
+                    await self.mem_repo.prune(
+                        user_id, self.config.max_memories_per_user
+                    )
+                    logger.info(f"用户 {user_id} 总结完成: {result.summary[:80]}")
+                except SummaryError as exc:
+                    logger.error(f"用户 {user_id} 总结校验失败: {exc}")
+                    await self.fifo_repo.delete_oldest(
+                        user_id, self.config.fifo_size, context_id
+                    )
+                except Exception as exc:
+                    logger.exception(f"用户 {user_id} 总结异常: {exc}")
 
-        if result.cross_user_operations:
-            await self._apply_cross_user_operations(subject_id, result.cross_user_operations)
+    def _schedule_summary(self, user_id: str, context_id: str) -> bool:
+        key = (user_id, context_id)
+        if key in self._scheduled_summaries:
+            return False
+        self._scheduled_summaries.add(key)
 
-        await self._evict_if_overflow(subject_id)
+        async def runner():
+            try:
+                await self._run_summary(user_id, context_id)
+            finally:
+                self._scheduled_summaries.discard(key)
 
-    async def _apply_cross_user_operations(self, current_subject_id: str, cross_ops: dict):
-        from datetime import datetime, timezone
+        asyncio.create_task(runner())
+        return True
 
-        current_parts = current_subject_id.split("#")
-        current_group = current_parts[1] if len(current_parts) > 1 and current_parts[1] not in ("shared", "private") else "unknown"
+    async def _fifo_watchdog(self):
+        max_wait_seconds = float(self.config.fifo_max_wait_minutes) * 60.0
+        interval = min(60.0, max(10.0, max_wait_seconds / 4.0))
+        try:
+            while self._initialized:
+                cutoff = (
+                    datetime.now(timezone.utc) - timedelta(seconds=max_wait_seconds)
+                ).isoformat()
+                for stream in await self.fifo_repo.get_expired_streams(cutoff):
+                    self._schedule_summary(stream["user_id"], stream["context_id"])
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.exception(f"FIFO 超时扫描异常: {exc}")
 
-        for user_id, ops in cross_ops.items():
-            if not ops:
-                continue
-
-            if self.config.memory_mode == "shared":
-                target_subject = f"{user_id}#shared"
-            else:
-                target_subject = f"{user_id}#{current_group}"
-
-            lock = self._get_memory_lock(target_subject)
-            async with lock:
-                state = await self.mem_repo.get_state(target_subject)
-                index = {e.memory_id: e for e in state.all_entries()}
-
-                for op in ops:
-                    if op.action == "add":
-                        entry = MemoryEntry(
-                            memory_id=generate_turn_id().replace("turn", "mem"),
-                            content=op.content or "",
-                            layer=op.layer or "general",
-                            category=op.category or "fact",
-                            importance=op.importance or 3,
-                            subject_id=target_subject,
-                            source="auto_summary",
+    async def _apply_summary(
+        self, user_id, context_id, turn, result, memories, relations
+    ):
+        memory_index = {m.memory_id: m for m in memories}
+        relation_index = {r.relation_id: r for r in relations}
+        now = utc_now()
+        async with self.db.transaction():
+            for op in result.memory_operations:
+                if op.action == "delete":
+                    await self.mem_repo.deactivate_no_commit(op.memory_id, user_id)
+                    continue
+                if op.action in ("update", "reinforce"):
+                    entry = memory_index[op.memory_id]
+                    if op.action == "reinforce":
+                        entry.strength = min(1.0, entry.effective_strength() + 0.15)
+                        entry.confidence = min(1.0, entry.confidence + 0.03)
+                        entry.stability = min(1.0, entry.stability + 0.03)
+                        entry.confirmation_count += 1
+                    else:
+                        entry.content, entry.layer, entry.category = (
+                            op.content,
+                            op.layer,
+                            op.category,
                         )
-                        await self.mem_repo.upsert(entry)
-                        logger.debug(f"跨用户 add: {target_subject} memory={entry.memory_id}")
-                    elif op.action == "update" and op.memory_id:
-                        if op.memory_id in index:
-                            entry = index[op.memory_id]
-                            entry.content = op.content or entry.content
-                            entry.updated_at = datetime.now(timezone.utc).isoformat()
-                            await self.mem_repo.upsert(entry)
-                            logger.debug(f"跨用户 update: {target_subject} memory={op.memory_id}")
-                    elif op.action == "delete" and op.memory_id:
-                        if op.memory_id in index:
-                            await self.mem_repo.delete(op.memory_id)
-                            logger.debug(f"跨用户 delete: {target_subject} memory={op.memory_id}")
-
-                await self._evict_if_overflow(target_subject)
-
-    async def _evict_if_overflow(self, subject_id: str):
-        for layer in ("important", "general"):
-            count = await self.mem_repo.count_by_subject_layer(subject_id, layer)
-            if count <= self.config.max_memory_per_layer:
-                continue
-
-            entries = await self.mem_repo.get_by_subject(subject_id, layer)
-
-            if self.config.memory_overflow_policy == "condense":
-                try:
-                    condensed = await self.summarizer.condense(
-                        entries, self.config.max_memory_per_layer, layer
+                        entry.importance = self._int_range(
+                            op.importance, 1, 5, entry.importance
+                        )
+                        entry.confidence = self._float_range(
+                            op.confidence, entry.confidence
+                        )
+                        entry.stability = self._float_range(
+                            op.stability, entry.stability
+                        )
+                    entry.decay_rate = decay_rate_from_half_life(
+                        self.config.half_life_for_layer(entry.layer)
                     )
-                    await self.mem_repo.replace_layer(subject_id, layer, condensed)
-                    logger.debug(f"浓缩完成: {subject_id} {layer} 层 {len(entries)} -> {len(condensed)} 条")
-                except Exception as e:
-                    logger.warning(f"浓缩失败，回退到淘汰: {e}")
-                    await self._hard_evict(entries, count, subject_id, layer)
-            else:
-                await self._hard_evict(entries, count, subject_id, layer)
+                    entry.updated_at = entry.last_confirmed_at = now
+                else:
+                    scope = op.visibility_scope or "private"
+                    entry = MemoryEntry(
+                        memory_id=generate_memory_id(),
+                        owner_user_id=user_id,
+                        content=op.content,
+                        layer=op.layer,
+                        category=op.category,
+                        importance=self._int_range(op.importance, 1, 5, 3),
+                        confidence=self._float_range(op.confidence, 0.7),
+                        strength=0.8,
+                        stability=self._float_range(op.stability, 0.5),
+                        decay_rate=decay_rate_from_half_life(
+                            self.config.half_life_for_layer(op.layer)
+                        ),
+                        source_turn_id=turn.turn_id,
+                        visibility_scope=scope,
+                        context_id=context_id if scope == "group" else None,
+                    )
+                entry = await self.mem_repo.upsert_no_commit(entry)
+                if op.entity_ids:
+                    await self.graph_repo.link_memory_entities_no_commit(
+                        entry.memory_id,
+                        op.entity_ids,
+                        mention_role="mention",
+                        confidence=self._float_range(op.confidence, entry.confidence),
+                    )
 
-    async def _hard_evict(self, entries, count: int, subject_id: str, layer: str):
-        entries.sort(key=lambda e: (e.importance, e.updated_at))
-        to_delete = entries[: count - self.config.max_memory_per_layer]
-        tasks = []
-        for e in to_delete:
-            tasks.append(self.mem_repo.delete(e.memory_id))
-        if tasks:
-            await asyncio.gather(*tasks)
-        for e in to_delete:
-            logger.debug(f"淘汰记忆: {e.memory_id}")
+            for op in result.relation_operations:
+                anchor = f"user:{user_id}"
+                if op.action == "delete":
+                    relation = relation_index[op.relation_id]
+                    evidence = await self._relation_evidence_atom_no_commit(
+                        op.evidence,
+                        relation,
+                        user_id,
+                        turn.turn_id,
+                        "refute",
+                    )
+                    if evidence:
+                        await self.graph_repo.add_evidence_no_commit(evidence)
+                    await self.graph_repo.deactivate_no_commit(op.relation_id, anchor)
+                    continue
+                if op.action in ("update", "reinforce"):
+                    relation = relation_index[op.relation_id]
+                    if op.action == "reinforce":
+                        relation.strength = min(
+                            1.0, relation.effective_strength() + 0.15
+                        )
+                        relation.confidence = min(1.0, relation.confidence + 0.03)
+                        relation.stability = min(1.0, relation.stability + 0.03)
+                        relation.confirmation_count += 1
+                    else:
+                        relation.confidence = self._float_range(
+                            op.confidence, relation.confidence
+                        )
+                        relation.stability = self._float_range(
+                            op.stability, relation.stability
+                        )
+                        relation.relation_type = (
+                            op.relation_type or relation.relation_type
+                        )
+                    relation.updated_at = relation.last_confirmed_at = now
+                else:
+                    source = self._entity(
+                        op.source_entity_id,
+                        op.source_entity_type,
+                        op.source_name,
+                        op.source_aliases,
+                    )
+                    target = self._entity(
+                        op.target_entity_id,
+                        op.target_entity_type,
+                        op.target_name,
+                        op.target_aliases,
+                    )
+                    await self.graph_repo.upsert_entity_no_commit(source)
+                    await self.graph_repo.upsert_entity_no_commit(target)
+                    scope = op.visibility_scope or "private"
+                    relation = Relation(
+                        relation_id=generate_relation_id(),
+                        source_entity_id=source.entity_id,
+                        relation_type=op.relation_type,
+                        target_entity_id=target.entity_id,
+                        confidence=self._float_range(op.confidence, 0.7),
+                        strength=0.8,
+                        stability=self._float_range(op.stability, 0.5),
+                        decay_rate=decay_rate_from_half_life(
+                            self.config.relation_half_life_days
+                        ),
+                        visibility_scope=scope,
+                        context_id=context_id if scope == "group" else None,
+                        owner_user_id=user_id,
+                    )
+                evidence = await self._relation_evidence_atom_no_commit(
+                    op.evidence,
+                    relation,
+                    user_id,
+                    turn.turn_id,
+                    "support",
+                )
+                await self.graph_repo.upsert_relation_no_commit(relation, evidence)
 
-    # ------------------------------------------------------------------
-    # 命令
-    # ------------------------------------------------------------------
+    def _entity(self, entity_id, entity_type, name, aliases=None):
+        allowed = ("user", "group", "project", "organization", "topic", "other")
+        kind = entity_type if entity_type in allowed else "other"
+        if not entity_id or ":" not in entity_id:
+            raise SummaryError(f"实体 ID 无效: {entity_id}")
+        clean_aliases = [
+            str(alias).strip()
+            for alias in (aliases or [])
+            if str(alias).strip() and str(alias).strip() != (name or entity_id)
+        ]
+        return Entity(
+            entity_id=entity_id,
+            entity_type=kind,
+            name=name or entity_id,
+            aliases=list(dict.fromkeys(clean_aliases))[:20],
+        )
+
+    async def _relation_evidence_atom_no_commit(
+        self, excerpt, relation, user_id, turn_id, polarity
+    ):
+        if not excerpt:
+            return None
+        memory = await self.mem_repo.upsert_no_commit(
+            MemoryEntry(
+                memory_id=generate_memory_id(),
+                owner_user_id=user_id,
+                content=str(excerpt)[:500],
+                layer="episodic",
+                category="relation",
+                importance=4,
+                confidence=relation.confidence,
+                strength=0.8,
+                stability=relation.stability,
+                decay_rate=decay_rate_from_half_life(
+                    self.config.episodic_half_life_days
+                ),
+                source="relation_evidence",
+                source_turn_id=turn_id,
+                visibility_scope=relation.visibility_scope or "private",
+                context_id=relation.context_id,
+            )
+        )
+        await self.graph_repo.link_memory_entities_no_commit(
+            memory.memory_id,
+            [relation.source_entity_id, relation.target_entity_id],
+            mention_role="evidence",
+            confidence=relation.confidence,
+        )
+        return RelationEvidence(
+            evidence_id=generate_evidence_id(),
+            relation_id=relation.relation_id,
+            excerpt=str(excerpt)[:500],
+            speaker_user_id=user_id,
+            turn_id=turn_id,
+            memory_id=memory.memory_id,
+            polarity=polarity,
+            evidence_weight=relation.confidence,
+        )
+
+    async def _load_relation_entities(self, relations):
+        result = {}
+        for entity_id in {
+            x for r in relations for x in (r.source_entity_id, r.target_entity_id)
+        }:
+            entity = await self.graph_repo.get_entity(entity_id)
+            if entity:
+                result[entity_id] = entity
+        return result
+
+    async def page_stats(self):
+        if not self._initialized:
+            await self.initialize()
+        queries = {
+            "memories": "SELECT COUNT(*) n FROM memories WHERE status='active'",
+            "users": "SELECT COUNT(DISTINCT owner_user_id) n FROM memories WHERE status='active'",
+            "entities": "SELECT COUNT(*) n FROM entities",
+            "relations": "SELECT COUNT(*) n FROM relations WHERE status='active'",
+            "fifo": "SELECT COUNT(*) n FROM fifo_buffer",
+        }
+        stats = {}
+        for key, sql in queries.items():
+            async with self.db.conn.execute(sql) as cursor:
+                stats[key] = (await cursor.fetchone())["n"]
+        async with self.db.conn.execute(
+            "SELECT layer,COUNT(*) n FROM memories WHERE status='active' GROUP BY layer"
+        ) as cursor:
+            stats["layers"] = {r["layer"]: r["n"] for r in await cursor.fetchall()}
+        stats["fts"] = await self.db.fts_status()
+        return json_response(stats)
+
+    async def page_graph(self):
+        if not self._initialized:
+            await self.initialize()
+        limit = max(1, min(500, request.query.get("limit", 200, type=int)))
+        relations = await self.graph_repo.list_relations(limit)
+        entity_ids = {
+            x for r in relations for x in (r.source_entity_id, r.target_entity_id)
+        }
+        entities = {
+            e.entity_id: e
+            for e in await self.graph_repo.list_entities(max(limit * 2, 100))
+        }
+        nodes = []
+        for entity_id in entity_ids:
+            entity = entities.get(entity_id) or await self.graph_repo.get_entity(
+                entity_id
+            )
+            if entity:
+                nodes.append(
+                    {
+                        "id": entity.entity_id,
+                        "type": entity.entity_type,
+                        "name": entity.name,
+                        "aliases": entity.aliases,
+                    }
+                )
+        edges = [
+            {
+                "id": r.relation_id,
+                "source": r.source_entity_id,
+                "target": r.target_entity_id,
+                "type": r.relation_type,
+                "confidence": r.confidence,
+                "strength": round(r.effective_strength(), 4),
+                "scope": r.visibility_scope,
+                "context_id": r.context_id,
+                "owner_user_id": r.owner_user_id,
+            }
+            for r in relations
+        ]
+        return json_response({"nodes": nodes, "edges": edges})
+
+    async def page_memories(self):
+        if not self._initialized:
+            await self.initialize()
+        limit = max(1, min(500, request.query.get("limit", 200, type=int)))
+        user_id = request.query.get("user_id", "") or ""
+        layer = request.query.get("layer", "") or ""
+        if layer and layer not in ("core", "semantic", "episodic", "working"):
+            return error_response("invalid layer", status_code=400)
+        memories = await self.mem_repo.list_recent(limit, user_id, layer)
+        return json_response(
+            {
+                "items": [
+                    {
+                        "memory_id": m.memory_id,
+                        "user_id": m.owner_user_id,
+                        "content": m.content,
+                        "layer": m.layer,
+                        "category": m.category,
+                        "importance": m.importance,
+                        "confidence": m.confidence,
+                        "strength": round(m.effective_strength(), 4),
+                        "updated_at": m.updated_at,
+                    }
+                    for m in memories
+                ]
+            }
+        )
+
+    async def page_recall(self):
+        if not self._initialized:
+            await self.initialize()
+        payload = await request.json(default={})
+        user_id = str(payload.get("user_id", "")).strip()
+        message = str(payload.get("message", "")).strip()
+        context_id = str(payload.get("context_id", f"private:{user_id}")).strip()
+        if not user_id or not message:
+            return error_response("user_id and message are required", status_code=400)
+        result = await self.graph_retriever.recall(user_id, message, context_id)
+        atom_search = result.atom_search
+        return json_response(
+            {
+                "query": message,
+                "search": {
+                    "mode": atom_search.mode if atom_search else "disabled",
+                    "query_terms": atom_search.query_terms if atom_search else [],
+                    "fts_available": atom_search.fts_available
+                    if atom_search
+                    else False,
+                    "tokenizer": atom_search.tokenizer if atom_search else "like",
+                },
+                "atoms": [
+                    {
+                        "memory_id": hit.memory.memory_id,
+                        "content": hit.memory.content,
+                        "layer": hit.memory.layer,
+                        "category": hit.memory.category,
+                        "score": hit.score,
+                        "components": {
+                            "text": hit.text_score,
+                            "strength": hit.strength_score,
+                            "importance": hit.importance_score,
+                            "confidence": hit.confidence_score,
+                        },
+                        "reasons": hit.reasons,
+                    }
+                    for hit in (atom_search.hits if atom_search else [])
+                ],
+                "atom_entities": [
+                    {
+                        "memory_id": memory_id,
+                        "entities": [
+                            {"id": entity.entity_id, "name": entity.name}
+                            for entity in entities
+                        ],
+                    }
+                    for memory_id, entities in result.atom_entities.items()
+                ],
+                "evidence_edges": [
+                    {
+                        "memory_id": edge.memory_id,
+                        "relation_id": edge.relation.relation_id,
+                        "source": edge.relation.source_entity_id,
+                        "target": edge.relation.target_entity_id,
+                        "type": edge.relation.relation_type,
+                        "polarity": edge.evidence.polarity,
+                        "weight": edge.evidence.evidence_weight,
+                    }
+                    for edge in result.evidence_edges
+                ],
+                "matched_entities": [
+                    {
+                        "id": m.entity.entity_id,
+                        "name": m.entity.name,
+                        "alias": m.alias,
+                        "kind": m.match_kind,
+                        "score": m.score,
+                        "memory_ids": m.memory_ids,
+                    }
+                    for m in result.matched_entities
+                ],
+                "intents": result.intents,
+                "relations": [
+                    {
+                        "id": x.relation.relation_id,
+                        "source": x.relation.source_entity_id,
+                        "target": x.relation.target_entity_id,
+                        "type": x.relation.relation_type,
+                        "score": x.score,
+                        "reasons": x.reasons,
+                        "strength": round(x.relation.effective_strength(), 4),
+                        "confidence": x.relation.confidence,
+                        "hop": x.hop,
+                        "supporting_memory_ids": x.supporting_memory_ids,
+                    }
+                    for x in result.scored_relations
+                ],
+            }
+        )
+
+    async def page_settings(self):
+        editable = {
+            "fifo_size",
+            "fifo_max_wait_minutes",
+            "max_memories_per_user",
+            "max_injected_memories",
+            "max_injected_relations",
+            "atom_fts_candidate_limit",
+            "atom_like_candidate_limit",
+            "atom_background_limit",
+            "atom_query_term_limit",
+            "graph_recall_max_hops",
+            "graph_alias_min_length",
+            "graph_max_matched_entities",
+            "graph_entity_scan_limit",
+            "retrieval_min_strength",
+            "relation_intent_keywords",
+            "core_half_life_days",
+            "semantic_half_life_days",
+            "episodic_half_life_days",
+            "working_half_life_days",
+            "relation_half_life_days",
+            "enable_auto_summary",
+            "enable_llm_tools",
+            "inject_memory_in_private",
+            "inject_memory_in_group",
+            "inject_fifo_in_group",
+            "max_concurrent_summaries",
+            "summary_provider_id",
+            "summary_system_prompt",
+            "enable_manual_summary",
+            "tool_caution_in_prompt",
+        }
+        if request.method == "GET":
+            return json_response(
+                {k: v for k, v in asdict(self.config).items() if k in editable}
+            )
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("settings payload must be an object", status_code=400)
+        unknown = set(payload) - editable
+        if unknown:
+            return error_response(
+                f"unsupported settings: {', '.join(sorted(unknown))}", status_code=400
+            )
+        try:
+            candidate = {**asdict(self.config), **payload}
+            updated = PluginConfig.from_astrbot_config(candidate)
+            if updated.graph_recall_max_hops not in (1, 2):
+                raise ValueError("graph_recall_max_hops must be 1 or 2")
+            if not isinstance(updated.relation_intent_keywords, dict):
+                raise ValueError("relation_intent_keywords must be an object")
+            if any(
+                not isinstance(words, list)
+                or not all(isinstance(word, str) and word.strip() for word in words)
+                for words in updated.relation_intent_keywords.values()
+            ):
+                raise ValueError("each relation intent must contain a string list")
+            numeric_ranges = {
+                "fifo_size": (1, 100),
+                "fifo_max_wait_minutes": (0, 10080),
+                "max_memories_per_user": (20, 2000),
+                "max_injected_memories": (1, 100),
+                "max_injected_relations": (0, 100),
+                "atom_fts_candidate_limit": (4, 500),
+                "atom_like_candidate_limit": (4, 200),
+                "atom_background_limit": (1, 20),
+                "atom_query_term_limit": (4, 100),
+                "graph_alias_min_length": (1, 16),
+                "graph_max_matched_entities": (1, 20),
+                "graph_entity_scan_limit": (100, 50000),
+                "retrieval_min_strength": (0, 1),
+                "max_concurrent_summaries": (1, 10),
+                "core_half_life_days": (0, 36500),
+                "semantic_half_life_days": (0.1, 36500),
+                "episodic_half_life_days": (0.1, 36500),
+                "working_half_life_days": (0.1, 36500),
+                "relation_half_life_days": (0.1, 36500),
+            }
+            for key, (minimum, maximum) in numeric_ranges.items():
+                value = getattr(updated, key)
+                if not minimum <= value <= maximum:
+                    raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        except (TypeError, ValueError) as exc:
+            return error_response(str(exc), status_code=400)
+        for key in editable:
+            setattr(self.config, key, getattr(updated, key))
+            self._raw_config[key] = getattr(updated, key)
+        save = getattr(self._raw_config, "save_config", None)
+        if callable(save):
+            save()
+        self._summary_semaphore = asyncio.Semaphore(
+            max(1, int(self.config.max_concurrent_summaries))
+        )
+        await self._restart_fifo_watchdog()
+        return json_response({"saved": True})
+
+    async def _restart_fifo_watchdog(self):
+        if self._fifo_watchdog_task:
+            self._fifo_watchdog_task.cancel()
+            try:
+                await self._fifo_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._fifo_watchdog_task = None
+        if (
+            self._initialized
+            and self.config.enable_auto_summary
+            and self.config.fifo_max_wait_minutes > 0
+        ):
+            self._fifo_watchdog_task = asyncio.create_task(self._fifo_watchdog())
+
+    def _user_lock(self, user_id):
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
+        return self._user_locks[user_id]
+
+    async def _expire_pending(self, origin, pending_id):
+        await asyncio.sleep(120)
+        queue = self._pending.get(origin)
+        if queue:
+            self._pending[origin] = deque(
+                x for x in queue if x["pending_id"] != pending_id
+            )
+            if not self._pending[origin]:
+                self._pending.pop(origin, None)
+
+    def _remember_nickname(self, event, user_id):
+        name = next(
+            (
+                getattr(event, x, None)
+                for x in ("sender_name", "nickname", "group_nickname")
+                if getattr(event, x, None)
+            ),
+            user_id,
+        )
+        self._nickname_cache[user_id] = str(name)
+        self._nickname_cache.move_to_end(user_id)
+        while len(self._nickname_cache) > self._NICKNAME_CACHE_MAX:
+            self._nickname_cache.popitem(last=False)
+        return str(name)
+
+    @staticmethod
+    def _float_range(value, default):
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _int_range(value, low, high, default):
+        try:
+            return max(low, min(high, int(value)))
+        except (TypeError, ValueError):
+            return default
 
     @filter.command_group("memory")
     def memory_group(self, event: AstrMessageEvent, args: list):
@@ -474,260 +833,92 @@ class SmartMemoryPlugin(Star):
 
     @memory_group.command("sum")
     async def cmd_sum(self, event: AstrMessageEvent):
-        """手动触发总结"""
         if not self.config.enable_manual_summary:
-            yield event.plain_result("手动总结功能已禁用。")
+            yield event.plain_result("手动总结已禁用。")
             return
-
-        subject_id = extract_subject_id(event, self.config.memory_mode)
-        asyncio.create_task(self._run_summary(subject_id))
-        yield event.plain_result("总结任务已在后台启动。")
-
-    @memory_group.command("summarize")
-    async def cmd_summarize(self, event: AstrMessageEvent):
-        """手动触发总结（别名）"""
-        async for result in self.cmd_sum(event):
-            yield result
+        self._schedule_summary(extract_user_id(event), extract_context_id(event))
+        yield event.plain_result("总结任务已启动。")
 
     @memory_group.command("check")
     async def cmd_check(self, event: AstrMessageEvent):
-        text = event.message_str or ""
-        parts = text.strip().split()
-        args = parts[2:] if len(parts) > 2 else []
+        parts = (event.message_str or "").split()
+        yield await self.commands.check(event, parts[2] if len(parts) > 2 else None)
 
-        target_user_id = None
-        layer = None
-        for arg in args:
-            if arg.startswith("@"):
-                target_user_id = arg.lstrip("@")
-            else:
-                layer = arg
-
-        if target_user_id:
-            if not event.is_admin():
-                yield event.plain_result("无权查看其他用户的记忆，需要管理员权限。")
-                return
-
-            current_subject_id = extract_subject_id(event, self.config.memory_mode)
-            target_subject = build_cross_subject_id(
-                target_user_id, current_subject_id, self.config.memory_mode
-            )
-
-            if layer and layer not in ("important", "general", "fleeting"):
-                yield event.plain_result(f"无效层级: {layer}。可选: important, general, fleeting")
-                return
-
-            entries = await self.mem_repo.get_by_subject(target_subject, layer or None)
-            if not entries:
-                yield event.plain_result(f"用户 {target_user_id} 在 {layer or '全部'} 层无记忆记录。")
-                return
-
-            lines = [f"=== 用户 {target_user_id} 的 {layer or '全部'} 记忆 ==="]
-            for e in entries:
-                lines.append(f"[{e.layer}] {e.content[:80]} (id: {e.memory_id})")
-            yield event.plain_result("\n".join(lines))
-            return
-
-        result = await self.cmd_handler.handle(event, "check", args)
-        yield result
-
-    @memory_group.command("rollback")
-    async def cmd_rollback(self, event: AstrMessageEvent):
-        """回滚记忆"""
-        try:
-            await self.db.close()
-            await self.backup_service.restore_latest()
-            self.db = await SQLiteDB(self.db_path).connect()
-            self.mem_repo = MemoryRepository(self.db.conn)
-            self.fifo_repo = FifoRepository(self.db.conn)
-            self.backup_service = BackupService(self.db, self.data_dir / "backup")
-            self.cmd_handler = CommandHandler(
-                self.config, self.mem_repo, self.fifo_repo, self.backup_service
-            )
-            self.memory_tools = MemoryTools(self.config, self.mem_repo)
-            yield event.plain_result("已回滚到上次备份，数据库连接已重新建立。")
-        except Exception as e:
-            logger.error(f"回滚失败: {e}")
-            yield event.plain_result(f"回滚失败: {e}")
-
-    @memory_group.command("status")
-    async def cmd_status(self, event: AstrMessageEvent):
-        """查看状态"""
-        result = await self.cmd_handler.handle(event, "status", [])
-        yield result
+    @memory_group.command("graph")
+    async def cmd_graph(self, event: AstrMessageEvent):
+        yield await self.commands.graph(event)
 
     @memory_group.command("fifo")
     async def cmd_fifo(self, event: AstrMessageEvent):
-        """查看 FIFO 对话缓存"""
-        result = await self.cmd_handler.handle(event, "fifo", [])
-        yield result
+        yield await self.commands.fifo(event)
+
+    @memory_group.command("status")
+    async def cmd_status(self, event: AstrMessageEvent):
+        yield await self.commands.status(event)
 
     @memory_group.command("clear")
     async def cmd_clear(self, event: AstrMessageEvent):
-        """清除自己的记忆"""
-        result = await self.cmd_handler.handle(event, "clear", [])
-        yield result
+        yield await self.commands.clear(event)
 
-    @memory_group.command("admin_clear")
-    async def cmd_admin_clear(self, event: AstrMessageEvent):
-        """管理员清除指定用户或所有用户的记忆"""
+    @memory_group.command("rollback")
+    async def cmd_rollback(self, event: AstrMessageEvent):
         if not event.is_admin():
-            yield event.plain_result("无权使用此命令，需要管理员权限。")
+            yield event.plain_result("整库回滚仅限管理员。")
             return
-
-        text = event.message_str or ""
-        parts = text.strip().split()
-        target = parts[2] if len(parts) > 2 else None
-
-        if not target:
-            yield event.plain_result("用法: /memory admin_clear <user_id|all>")
-            return
-
-        if target == "all":
-            # 清除所有记忆和 FIFO
-            subjects = await self.mem_repo.list_all_subjects()
-            for sid in subjects:
-                await self.mem_repo.delete_by_subject(sid)
-                await self.fifo_repo.clear(sid)
-            logger.info(f"管理员 {event.get_sender_id()} 清除了所有用户记忆")
-            yield event.plain_result(f"已清除所有用户的记忆和 FIFO（共 {len(subjects)} 个 subject）。")
-        else:
-            # 清除指定用户
-            # target 可以是 user_id，需要匹配所有相关 subject_id
-            async with self.db.conn.execute(
-                "SELECT DISTINCT subject_id FROM memories WHERE subject_id LIKE ?",
-                (f"{target}#%",),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            subjects = [row["subject_id"] for row in rows]
-
-            # 也检查 fifo_buffer
-            async with self.db.conn.execute(
-                "SELECT DISTINCT subject_id FROM fifo_buffer WHERE subject_id LIKE ?",
-                (f"{target}#%",),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            subjects += [row["subject_id"] for row in rows]
-            subjects = list(set(subjects))
-
-            if not subjects:
-                yield event.plain_result(f"未找到用户 {target} 的记忆记录。")
-                return
-
-            for sid in subjects:
-                await self.mem_repo.delete_by_subject(sid)
-                await self.fifo_repo.clear(sid)
-            logger.info(f"管理员 {event.get_sender_id()} 清除了用户 {target} 的记忆")
-            yield event.plain_result(f"已清除用户 {target} 的记忆和 FIFO（共 {len(subjects)} 个上下文）。")
-
-    @memory_group.command("condense")
-    async def cmd_condense(self, event: AstrMessageEvent):
-        """手动触发记忆浓缩（对 important 和 general 层）"""
-        subject_id = extract_subject_id(event, self.config.memory_mode)
-        results = []
-        for layer in ("important", "general"):
-            entries = await self.mem_repo.get_by_subject(subject_id, layer)
-            before = len(entries)
-            if before <= self.config.max_memory_per_layer:
-                results.append(f"{layer}: {before} 条，未超限，无需浓缩")
-                continue
+        async with self._maintenance_lock:
             try:
-                condensed = await self.summarizer.condense(
-                    entries, self.config.max_memory_per_layer, layer
-                )
-                await self.mem_repo.replace_layer(subject_id, layer, condensed)
-                results.append(f"{layer}: {before} -> {len(condensed)} 条")
-            except Exception as e:
-                results.append(f"{layer}: 浓缩失败 - {e}")
-        yield event.plain_result("记忆浓缩完成:\n" + "\n".join(results))
+                latest = self.backup_service.get_latest_backup()
+                await self.db.close()
+                import shutil
+
+                shutil.copy2(latest, self.db_path)
+                self.db = await SQLiteDB(self.db_path).connect()
+                await self.db.init_tables()
+                self._wire_services()
+                yield event.plain_result(f"已回滚到 {latest.name}")
+            except Exception as exc:
+                logger.error(f"回滚失败: {exc}")
+                yield event.plain_result(f"回滚失败: {exc}")
 
     @memory_group.command("help")
     async def cmd_help(self, event: AstrMessageEvent):
-        """帮助"""
-        result = await self.cmd_handler.handle(event, "help", [])
-        yield result
-
-    # ------------------------------------------------------------------
-    # 工具
-    # ------------------------------------------------------------------
+        yield self.commands.help(event)
 
     @filter.llm_tool(name="memory_add")
     async def tool_memory_add(
         self,
         event: AstrMessageEvent,
         content: str = "",
-        layer: str = "general",
+        layer: str = "semantic",
         category: str = "fact",
         importance: int = 3,
-    ) -> str:
+    ):
         return await self.memory_tools.memory_add(
-            event, content=content, layer=layer, category=category, importance=importance
+            event, content, layer, category, importance
         )
 
     @filter.llm_tool(name="memory_update")
     async def tool_memory_update(
-        self,
-        event: AstrMessageEvent,
-        memory_id: str = "",
-        content: str = "",
-    ) -> str:
-        return await self.memory_tools.memory_update(
-            event, memory_id=memory_id, content=content
-        )
+        self, event: AstrMessageEvent, memory_id: str = "", content: str = ""
+    ):
+        return await self.memory_tools.memory_update(event, memory_id, content)
 
     @filter.llm_tool(name="memory_delete")
-    async def tool_memory_delete(
-        self,
-        event: AstrMessageEvent,
-        memory_id: str = "",
-    ) -> str:
-        return await self.memory_tools.memory_delete(event, memory_id=memory_id)
-
-    @filter.llm_tool(name="memory_read_user")
-    async def tool_memory_read_user(
-        self,
-        event: AstrMessageEvent,
-        user_id: str = "",
-        layer: str = "",
-    ) -> str:
-        """读取指定用户的记忆。在总结过程中如果发现需要更新其他用户的记忆时使用。"""
-        return await self.memory_tools.memory_read_user(event, user_id=user_id, layer=layer)
-
-    # ------------------------------------------------------------------
-    # 辅助方法
-    # ------------------------------------------------------------------
-
-    def _update_nickname_cache(self, event: AstrMessageEvent):
-        sender_id = event.get_sender_id()
-        if not sender_id:
-            return
-        name = None
-        for attr in ("sender_name", "nickname", "group_nickname"):
-            val = getattr(event, attr, None)
-            if val:
-                name = val
-                break
-        if not name:
-            sender = getattr(event, "sender", None)
-            if sender:
-                name = getattr(sender, "nickname", None) or getattr(sender, "member_name", None)
-        if not name:
-            name = sender_id
-
-        if sender_id in self._nickname_cache:
-            self._nickname_cache.move_to_end(sender_id)
-        self._nickname_cache[sender_id] = name
-
-        while len(self._nickname_cache) > self._NICKNAME_CACHE_MAX:
-            self._nickname_cache.popitem(last=False)
-
-    def _extract_subject_id(self, event: AstrMessageEvent) -> str:
-        return extract_subject_id(event, self.config.memory_mode)
-
-
+    async def tool_memory_delete(self, event: AstrMessageEvent, memory_id: str = ""):
+        return await self.memory_tools.memory_delete(event, memory_id)
 
     async def terminate(self):
-        """插件卸载"""
+        self._initialized = False
+        if self._fifo_watchdog_task:
+            self._fifo_watchdog_task.cancel()
+            try:
+                await self._fifo_watchdog_task
+            except asyncio.CancelledError:
+                pass
         if self.db:
             await self.db.close()
-            logger.info("SmartMemory 插件已卸载，数据库连接已关闭")
+        logger.info("TierMem 已卸载")
+
+
+# Preserve the historic class name for integrations importing it directly.
+SmartMemoryPlugin = TierMemPlugin

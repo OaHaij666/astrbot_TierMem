@@ -14,8 +14,8 @@ class BackupService:
 
     async def create_backup(self) -> Path:
         """创建数据库备份"""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_path = self.backup_dir / f"memory.db.bak.{timestamp}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        backup_path = self.backup_dir / f"{self.db.db_path.name}.bak.{timestamp}"
         await self.db.vacuum_backup(backup_path)
         logger.debug(f"备份已创建: {backup_path}")
         return backup_path
@@ -25,7 +25,11 @@ class BackupService:
         if not self.backup_dir.exists():
             return []
         backups = sorted(
-            [p for p in self.backup_dir.iterdir() if p.suffix.startswith(".bak")],
+            [
+                p
+                for p in self.backup_dir.iterdir()
+                if p.name.startswith(f"{self.db.db_path.name}.bak.")
+            ],
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -41,8 +45,10 @@ class BackupService:
         """从最新备份恢复"""
         latest = self.get_latest_backup()
         # 先备份当前数据库
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        pre_restore = self.backup_dir / f"memory.db.pre_restore.{timestamp}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        pre_restore = (
+            self.backup_dir / f"{self.db.db_path.name}.pre_restore.{timestamp}"
+        )
         shutil.copy2(self.db.db_path, pre_restore)
         # 恢复
         shutil.copy2(latest, self.db.db_path)
@@ -53,5 +59,9 @@ class BackupService:
         """只保留最近 keep 个备份"""
         backups = self.list_backups()
         for old in backups[keep:]:
-            old.unlink()
-            logger.debug(f"清理旧备份: {old}")
+            try:
+                old.unlink()
+                logger.debug(f"清理旧备份: {old}")
+            except FileNotFoundError:
+                # 多个总结任务可能同时清理同一份旧备份。
+                pass

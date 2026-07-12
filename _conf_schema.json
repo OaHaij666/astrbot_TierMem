@@ -1,115 +1,32 @@
 {
-    "memory_mode": {
-        "description": "记忆共享模式",
-        "type": "string",
-        "default": "global",
-        "options": ["global", "shared"],
-        "hint": "global=各群独立记忆；shared=跨群共享记忆"
-    },
-    "fifo_size": {
-        "description": "近期对话队列长度，满后自动触发总结",
-        "type": "int",
-        "default": 10,
-        "min": 3,
-        "max": 50
-    },
-    "inject_fifo_in_group": {
-        "description": "群聊时是否将近期未总结对话注入提示词",
-        "type": "bool",
-        "default": true
-    },
-    "max_memory_per_layer": {
-        "description": "每层记忆最大条数",
-        "type": "int",
-        "default": 50,
-        "min": 10,
-        "max": 200
-    },
-    "fleeting_ttl_rounds": {
-        "description": "短暂记忆存活轮数",
-        "type": "int",
-        "default": 3,
-        "min": 1,
-        "max": 20
-    },
-    "max_concurrent_summaries": {
-        "description": "最大并发总结任务数",
-        "type": "int",
-        "default": 2,
-        "min": 1,
-        "max": 10
-    },
-    "summary_provider_id": {
-        "description": "总结用 LLM Provider ID，留空使用主模型",
-        "type": "text",
-        "default": ""
-    },
-    "summary_system_prompt": {
-        "description": "总结任务的额外系统提示词",
-        "type": "text",
-        "default": ""
-    },
-    "summary_search_replace_prompt": {
-        "description": "search_replace 模式提示词模板（留空用默认）",
-        "type": "text",
-        "default": ""
-    },
-    "summary_full_replace_prompt": {
-        "description": "full_replace 模式提示词模板（留空用默认）",
-        "type": "text",
-        "default": ""
-    },
-    "inject_memory_in_private": {
-        "description": "私聊时是否注入三层记忆",
-        "type": "bool",
-        "default": true
-    },
-    "inject_layers_in_group": {
-        "description": "群聊时注入的记忆层",
-        "type": "string",
-        "default": "important_only",
-        "options": ["important_only", "important_general", "all"],
-        "hint": "important_only=仅重要记忆；important_general=重要+一般；all=全部"
-    },
-    "active_user_inject_count": {
-        "description": "群聊时额外注入多少名活跃用户的印象（0=不注入）",
-        "type": "int",
-        "default": 4,
-        "min": 0,
-        "max": 20
-    },
-    "active_user_inject_layers": {
-        "description": "活跃用户印象注入层级",
-        "type": "string",
-        "default": "important_general",
-        "options": ["important_only", "important_general", "all"],
-        "hint": "important_only=仅重要记忆；important_general=重要+一般；all=全部含短期"
-    },
-    "enable_auto_summary": {
-        "description": "是否启用队列满自动总结",
-        "type": "bool",
-        "default": true
-    },
-    "enable_manual_summary": {
-        "description": "是否允许用户手动触发总结",
-        "type": "bool",
-        "default": true
-    },
-    "enable_llm_tools": {
-        "description": "是否向 LLM 暴露记忆管理工具",
-        "type": "bool",
-        "default": true
-    },
-    "tool_caution_in_prompt": {
-        "description": "是否附加工具使用警告",
-        "type": "bool",
-        "default": true
-    },
-    "memory_overflow_policy": {
-        "description": "记忆超限处理策略：evict=按重要性+时间淘汰；condense=调用LLM浓缩合并",
-        "type": "string",
-        "default": "evict",
-        "options": ["evict", "condense"],
-        "hint": "evict=按(importance,updated_at)淘汰最不重要的；condense=调用LLM合并语义相似的记忆"
-    }
+  "fifo_size": {"description":"触发自动总结的对话轮数","type":"int","default":10,"min":3,"max":50},
+  "fifo_max_wait_minutes": {"description":"FIFO 最老一轮超过该时间后，无论条数多少都触发总结；0 表示关闭时间触发","type":"float","default":30.0,"min":0.0,"max":10080.0},
+  "max_memories_per_user": {"description":"单用户最多保留的活跃原子记忆","type":"int","default":200,"min":20,"max":2000},
+  "max_injected_memories": {"description":"单次最多注入的原子记忆数","type":"int","default":24,"min":1,"max":100},
+  "max_injected_relations": {"description":"单次最多注入的一跳关系数","type":"int","default":12,"min":0,"max":50},
+  "atom_fts_candidate_limit": {"description":"FTS5 初筛的原子候选上限","type":"int","default":40,"min":4,"max":500},
+  "atom_like_candidate_limit": {"description":"FTS5 无结果时 LIKE 降级候选上限","type":"int","default":24,"min":4,"max":200},
+  "atom_background_limit": {"description":"关键词完全无结果时注入的重要原子数","type":"int","default":4,"min":1,"max":20},
+  "atom_query_term_limit": {"description":"单次 FTS 查询最多生成的中英文检索词数","type":"int","default":24,"min":4,"max":100},
+  "graph_recall_max_hops": {"description":"图谱召回最大跳数","type":"int","default":2,"options":[1,2]},
+  "graph_alias_min_length": {"description":"参与原文匹配的最短实体别名长度","type":"int","default":2,"min":1,"max":16},
+  "graph_max_matched_entities": {"description":"一条消息最多采用的实体候选数","type":"int","default":6,"min":1,"max":20},
+  "graph_entity_scan_limit": {"description":"单次别名索引最多加载的实体数","type":"int","default":5000,"min":100,"max":50000},
+  "relation_intent_keywords": {"description":"关系类型到召回关键词的映射","type":"dict","default":{"friend_of":["朋友","好友","友人","friend"],"colleague_of":["同事","同僚","共事","colleague"],"participates_in":["参与","负责","开发","项目","participate"],"member_of":["成员","加入","属于","组织","member"],"likes":["喜欢","爱好","感兴趣","like"],"family_of":["家人","亲属","父亲","母亲","兄弟","姐妹","family"]},"items":{}},
+  "max_concurrent_summaries": {"description":"最大并发总结数","type":"int","default":2,"min":1,"max":10},
+  "summary_provider_id": {"description":"总结模型 Provider ID，留空使用主模型","type":"text","default":""},
+  "summary_system_prompt": {"description":"追加给记忆与关系抽取器的系统提示词","type":"text","default":""},
+  "inject_memory_in_private": {"description":"私聊注入记忆和关系","type":"bool","default":true},
+  "inject_memory_in_group": {"description":"群聊注入记忆和关系","type":"bool","default":true},
+  "inject_fifo_in_group": {"description":"群聊注入尚未总结的近期对话","type":"bool","default":true},
+  "enable_auto_summary": {"description":"FIFO 满后自动总结","type":"bool","default":true},
+  "enable_manual_summary": {"description":"允许手动总结","type":"bool","default":true},
+  "enable_llm_tools": {"description":"允许 LLM 修改当前用户原子记忆","type":"bool","default":true},
+  "tool_caution_in_prompt": {"description":"在提示词中添加工具边界说明","type":"bool","default":true},
+  "core_half_life_days": {"description":"核心记忆半衰期天数，0 表示不衰减","type":"float","default":0.0,"min":0.0,"max":36500.0},
+  "semantic_half_life_days": {"description":"语义记忆半衰期天数","type":"float","default":180.0,"min":1.0,"max":3650.0},
+  "episodic_half_life_days": {"description":"事件记忆半衰期天数","type":"float","default":45.0,"min":1.0,"max":3650.0},
+  "working_half_life_days": {"description":"工作记忆半衰期天数","type":"float","default":7.0,"min":0.1,"max":365.0},
+  "relation_half_life_days": {"description":"关系活跃强度半衰期天数","type":"float","default":180.0,"min":1.0,"max":3650.0},
+  "retrieval_min_strength": {"description":"低于此有效强度的信息不注入","type":"float","default":0.08,"min":0.0,"max":1.0}
 }
