@@ -798,7 +798,7 @@ $("#settings-form").addEventListener("submit", async (event) => {
     }
     await bridge.apiPost("settings", payload);
     $("#settings-state").textContent = "配置已保存并即时生效";
-    toast("TierMem 配置已保存");
+    toast("TierMem-层忆配置已保存");
   }).catch((error) => {
     $("#settings-state").textContent = error.message;
     toast(`保存失败：${error.message}`);
@@ -818,8 +818,8 @@ bridge.onContext?.((context) => {
   drawGraph();
 });
 document.title =
-  bridge.t?.("pages.tiermem-console.title", "TierMem 控制台") ||
-  "TierMem 控制台";
+  bridge.t?.("pages.tiermem-console.title", "TierMem-层忆控制台") ||
+  "TierMem-层忆控制台";
 $("#connection-label").textContent = window.AstrBotPluginPage
   ? "已连接 AstrBot"
   : "本地预览数据";

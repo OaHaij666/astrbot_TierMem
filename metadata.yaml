@@ -1,5 +1,5 @@
 name: astrbot_TierMem
-display_name: TierMem
+display_name: TierMem-层忆
 desc: 基于惰性衰减的多层原子记忆与用户关系知识图谱。
 version: v2.0.1
 author: OaHaij666
