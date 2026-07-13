@@ -105,7 +105,12 @@ else:  # Direct source-tree imports used by the standalone test runner.
     )
 
 
-@register("astrbot_TierMem", "TierMem-长期记忆", "原子记忆 + 关系知识图谱", "2.0.1")
+@register(
+    "astrbot_TierMem",
+    "TierMem-长期记忆",
+    "无需 Embedding 模型，基于多层原子记忆与关系知识图谱的长期记忆插件。",
+    "2.0.1",
+)
 class TierMemPlugin(Star):
     _NICKNAME_CACHE_MAX = 2000
 

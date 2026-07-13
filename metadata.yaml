@@ -1,6 +1,6 @@
 name: astrbot_TierMem
 display_name: TierMem-长期记忆
-desc: 基于惰性衰减的多层原子记忆与用户关系知识图谱。
+desc: 无需 Embedding 模型，基于多层原子记忆与关系知识图谱的长期记忆插件。
 version: v2.0.1
 author: OaHaij666
 repo: https://github.com/OaHaij666/astrbot_plugin_TierMem
