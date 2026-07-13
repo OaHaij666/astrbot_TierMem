@@ -82,6 +82,11 @@ class ProjectContractTests(unittest.TestCase):
         for filename in ("index.html", "style.css", "app.js"):
             self.assertGreater((page / filename).stat().st_size, 100)
 
+        logo = ROOT / "logo.png"
+        self.assertTrue(logo.is_file())
+        self.assertGreater(logo.stat().st_size, 1000)
+        self.assertEqual(logo.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
     def test_packaged_group_observer_ignores_stale_top_level_core_module(self):
         """AstrBot hot updates may retain an old top-level core.models object."""
         stale_models = importlib.import_module("core.models")
